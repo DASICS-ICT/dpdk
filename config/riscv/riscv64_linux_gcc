@@ -1,8 +1,8 @@
 [binaries]
-c = ['ccache', 'riscv64-linux-gnu-gcc']
-cpp = ['ccache', 'riscv64-linux-gnu-g++']
-ar = 'riscv64-linux-gnu-ar'
-strip = 'riscv64-linux-gnu-strip'
+c = ['ccache', 'riscv64-unknown-linux-gnu-gcc']
+cpp = ['ccache', 'riscv64-unknown-linux-gnu-g++']
+ar = 'riscv64-unknown-linux-gnu-ar'
+strip = 'riscv64-unknown-linux-gnu-strip'
 pcap-config = ''
 
 [host_machine]
