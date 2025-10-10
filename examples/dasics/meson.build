@@ -3,7 +3,7 @@ sources = files(
         'main.c',
 )
 
-cflags += ['-I/home/lgf/dasics/dmachecker/dpdk-rootfs/libs/LibDASICS/repo/include']
-ldflags += ['-L/home/lgf/dasics/dmachecker/dpdk-rootfs/libs/LibDASICS/build']
+cflags += ['-I../../../../libs/LibDASICS/repo/include']
+ldflags += ['-L../../../../libs/LibDASICS/build']
 ldflags += ['-lDASICS']
-ldflags += ['-T/home/lgf/dasics/dmachecker/dpdk-rootfs/libs/LibDASICS/repo/ld.lds']
+ldflags += ['-T../../../../libs/LibDASICS/repo/ld.lds']
