@@ -59,8 +59,6 @@ all_examples = [
         'vm_power_manager/guest_cli',
         'vmdq',
         'vmdq_dcb',
-        'vnic',
-        'dasics',
         'simpleperf',
 ]
 
