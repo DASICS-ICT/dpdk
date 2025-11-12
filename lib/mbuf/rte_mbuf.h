@@ -45,6 +45,13 @@
 extern "C" {
 #endif
 
+/* Weak no-op hooks for integration. A dbchecker-enabled library may
+ * provide strong definitions to perform per-mbuf alloc/free handling.
+ */
+
+extern void dbchecker_alloc_mtdt_hook(struct rte_mbuf *m) __attribute__((weak));
+extern void dbchecker_free_mtdt_hook(struct rte_mbuf *m) __attribute__((weak));
+
 /**
  * Get the name of a RX offload flag
  *
@@ -607,6 +614,10 @@ static inline struct rte_mbuf *rte_mbuf_raw_alloc(struct rte_mempool *mp)
 	if (rte_mempool_get(mp, &ret.ptr) < 0)
 		return NULL;
 	__rte_mbuf_raw_sanity_check(ret.m);
+
+	/* notify optional alloc hook so integrations can attach metadata */
+	if (likely(ret.m != NULL))
+		if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(ret.m);
 	return ret.m;
 }
 
@@ -643,8 +654,11 @@ rte_mbuf_raw_alloc_bulk(struct rte_mempool *mp, struct rte_mbuf **mbufs, unsigne
 {
 	int rc = rte_mempool_get_bulk(mp, (void **)mbufs, count);
 	if (likely(rc == 0))
-		for (unsigned int idx = 0; idx < count; idx++)
+		for (unsigned int idx = 0; idx < count; idx++) {
 			__rte_mbuf_raw_sanity_check(mbufs[idx]);
+			/* notify optional alloc hook per allocated mbuf */
+			if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(mbufs[idx]);
+		}
 	return rc;
 }
 
@@ -666,6 +680,8 @@ static __rte_always_inline void
 rte_mbuf_raw_free(struct rte_mbuf *m)
 {
 	__rte_mbuf_raw_sanity_check(m);
+	/* invoke optional free hook (no-op by default) */
+	if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(m);
 	rte_mempool_put(m->pool, m);
 }
 
@@ -700,6 +716,7 @@ rte_mbuf_raw_free_bulk(struct rte_mempool *mp, struct rte_mbuf **mbufs, unsigned
 		const struct rte_mbuf *m = mbufs[idx];
 		RTE_ASSERT(m != NULL);
 		RTE_ASSERT(m->pool == mp);
+		if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(mbufs[idx]);
 		__rte_mbuf_raw_sanity_check(m);
 	}
 

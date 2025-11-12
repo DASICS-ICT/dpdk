@@ -58,6 +58,14 @@
 #include "hotplug_mp.h"
 #include "log_internal.h"
 
+/* Optional dbchecker lifecycle hooks. These symbols are weak in
+ * lib/dbchecker so calling code can check for presence and call them
+ * only when dbchecker is linked in. Use consistent naming "hook"
+ * to match other hook-like extension points in the codebase.
+ */
+extern int dbchecker_module_init_hook(void) __attribute__((weak));
+extern void dbchecker_module_exit_hook(void) __attribute__((weak));
+
 #define MEMSIZE_IF_NO_HUGE_PAGE (64ULL * 1024ULL * 1024ULL)
 
 #define SOCKET_MEM_STRLEN (RTE_MAX_NUMA_NODES * 10)
@@ -1285,6 +1293,13 @@ rte_eal_init(int argc, char **argv)
 
 	eal_mcfg_complete();
 
+	/* If dbchecker is linked, call its init hook now. The symbol is weak
+	 * so check for presence before calling. This emulates kernel driver's
+	 * module init on EAL startup.
+	 */
+	if (dbchecker_module_init_hook)
+		(void)dbchecker_module_init_hook();
+
 	return fctret;
 }
 
@@ -1344,6 +1359,13 @@ rte_eal_cleanup(void)
 	rte_eal_malloc_heap_cleanup();
 	eal_cleanup_config(internal_conf);
 	eal_lcore_var_cleanup();
+	/* Call dbchecker exit hook if present to mimic kernel module exit on
+	 * EAL shutdown. Do this before log cleanup so messages from dbchecker
+	 * can be emitted.
+	 */
+	if (dbchecker_module_exit_hook)
+		dbchecker_module_exit_hook();
+
 	rte_eal_log_cleanup();
 	return 0;
 }

@@ -20,6 +20,7 @@ libraries = [
         'rcu', # rcu depends on ring
         'mempool',
         'mbuf',
+        'dbchecker',
         'net',
         'meter',
         'ethdev',
@@ -120,6 +121,14 @@ foreach l:libraries
     build = true
     reason = '<unknown reason>' # set if build == false to explain why
     name = l
+    # dbchecker is optional and disabled by default. Allow explicit enabling
+    # via -Denable_dbchecker=true. This prevents introducing an implicit
+    # dependency on user-space UIO devices unless the user opts in.
+    enable_dbchecker = get_option('enable_dbchecker')
+    if l == 'dbchecker' and not enable_dbchecker
+        build = false
+        reason = 'dbchecker disabled by default; enable with -Denable_dbchecker=true'
+    endif
     use_function_versioning = false
     annotate_locks = true
     sources = []
