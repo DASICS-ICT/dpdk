@@ -1040,21 +1040,25 @@ static inline int rte_pktmbuf_alloc_bulk(struct rte_mempool *pool,
 		while (idx != count) {
 			__rte_mbuf_raw_sanity_check(mbufs[idx]);
 			rte_pktmbuf_reset(mbufs[idx]);
+			if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(mbufs[idx]);
 			idx++;
 			/* fall-through */
 	case 3:
 			__rte_mbuf_raw_sanity_check(mbufs[idx]);
 			rte_pktmbuf_reset(mbufs[idx]);
+			if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(mbufs[idx]);
 			idx++;
 			/* fall-through */
 	case 2:
 			__rte_mbuf_raw_sanity_check(mbufs[idx]);
 			rte_pktmbuf_reset(mbufs[idx]);
+			if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(mbufs[idx]);
 			idx++;
 			/* fall-through */
 	case 1:
 			__rte_mbuf_raw_sanity_check(mbufs[idx]);
 			rte_pktmbuf_reset(mbufs[idx]);
+			if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(mbufs[idx]);
 			idx++;
 			/* fall-through */
 		}

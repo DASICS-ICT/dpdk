@@ -102,5 +102,7 @@ int dbchecker_module_init_hook(void);
 void dbchecker_module_exit_hook(void);
 void dbchecker_alloc_mtdt_hook(struct rte_mbuf *m);
 void dbchecker_free_mtdt_hook(struct rte_mbuf *m);
+void dbchecker_dma_zone_alloc_hook(const struct rte_memzone *mz);
+void dbchecker_dma_zone_free_hook(const struct rte_memzone *mz);
 
 #endif /* LIB_DBCHECKER_DBCHECKER_H */

@@ -32,6 +32,16 @@ static struct rte_eth_dev_switch {
 	enum rte_eth_switch_domain_state state;
 } eth_dev_switch_domains[RTE_MAX_ETHPORTS];
 
+/* Optional dbchecker hooks for memzone (DMA zone) allocations/frees.
+ * These are defined as weak no-op symbols here so that linking does not
+ * fail when lib/dbchecker is not built/linked. If lib/dbchecker is
+ * linked it provides strong definitions which will override these.
+ */
+extern void dbchecker_dma_zone_alloc_hook(const struct rte_memzone *mz)
+	__attribute__((weak));
+extern void dbchecker_dma_zone_free_hook(const struct rte_memzone *mz)
+	__attribute__((weak));
+
 static struct rte_eth_dev *
 eth_dev_allocated(const char *name)
 {
@@ -710,7 +720,11 @@ rte_eth_dma_zone_free(const struct rte_eth_dev *dev, const char *ring_name,
 
 	mz = rte_memzone_lookup(z_name);
 	if (mz)
-		rc = rte_memzone_free(mz);
+	{
+		 /* let dbchecker free any associated MTDT before freeing memzone */
+		 if (dbchecker_dma_zone_free_hook) dbchecker_dma_zone_free_hook(mz);
+		 rc = rte_memzone_free(mz);
+	}
 	else
 		rc = -ENOENT;
 
@@ -749,8 +763,11 @@ rte_eth_dma_zone_reserve(const struct rte_eth_dev *dev, const char *ring_name,
 		return mz;
 	}
 
-	return rte_memzone_reserve_aligned(z_name, size, socket_id,
+	mz = rte_memzone_reserve_aligned(z_name, size, socket_id,
 			RTE_MEMZONE_IOVA_CONTIG, align);
+		/* let dbchecker allocate MTDT and possibly update memzone iova */
+	if (mz && dbchecker_dma_zone_alloc_hook) dbchecker_dma_zone_alloc_hook(mz);
+	return mz;
 }
 
 RTE_EXPORT_INTERNAL_SYMBOL(rte_eth_hairpin_queue_peer_bind)

@@ -34,6 +34,8 @@ static void *uio_map = NULL;
 static size_t uio_map_size = 0;
 static pthread_t err_thread;
 static volatile bool err_thread_running = false;
+/* mutex to protect MMIO (uio_map) access across threads/cores */
+static pthread_mutex_t uio_mmio_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* store allocated metadata copies to avoid referencing stack addresses */
 static struct dbchecker_mtdt *dbte_table[MAX_DBTE_TABLE_SIZE];
@@ -80,35 +82,44 @@ static int find_uio_device_by_name(const char *target_name, char *out_dev, size_
 static uint32_t uio_read32(off_t offset)
 {
     if (!uio_map) return 0;
+    pthread_mutex_lock(&uio_mmio_lock);
     volatile uint32_t *p = (volatile uint32_t *)((char *)uio_map + offset);
-    return *p;
+    uint32_t v = *p;
+    pthread_mutex_unlock(&uio_mmio_lock);
+    return v;
 }
 
 static void uio_write32(off_t offset, uint32_t v)
 {
     if (!uio_map) return;
+    pthread_mutex_lock(&uio_mmio_lock);
     volatile uint32_t *p = (volatile uint32_t *)((char *)uio_map + offset);
     *p = v;
+    pthread_mutex_unlock(&uio_mmio_lock);
 }
 
 /* write 64 as lo/hi 32 at offset and offset+4 */
 static void uio_write64_lo_hi(uint64_t v, off_t offset)
 {
     if (!uio_map) return;
+    pthread_mutex_lock(&uio_mmio_lock);
     volatile uint32_t *plo = (volatile uint32_t *)((char *)uio_map + offset);
     volatile uint32_t *phi = (volatile uint32_t *)((char *)uio_map + offset + 4);
     *plo = (uint32_t)(v & 0xFFFFFFFFULL);
     *phi = (uint32_t)((v >> 32) & 0xFFFFFFFFULL);
+    pthread_mutex_unlock(&uio_mmio_lock);
 }
 
 /* read 64 from lo/hi 32 at offset and offset+4 */
 static uint64_t uio_read64_lo_hi(off_t offset)
 {
     if (!uio_map) return 0;
+    pthread_mutex_lock(&uio_mmio_lock);
     volatile uint32_t *plo = (volatile uint32_t *)((char *)uio_map + offset);
     volatile uint32_t *phi = (volatile uint32_t *)((char *)uio_map + offset + 4);
     uint32_t lo = *plo;
     uint32_t hi = *phi;
+    pthread_mutex_unlock(&uio_mmio_lock);
     return ((uint64_t)hi << 32) | lo;
 }
 
@@ -406,6 +417,37 @@ void dbchecker_free_mtdt_hook(struct rte_mbuf *m)
     rte_mbuf_iova_set(m, dbchecker_free_mtdt(iova));
     DBCHECKER_DEBUG_LOG("dbchecker_free_mtdt_hook: freed mbuf iova 0x%llx\n",
         (unsigned long long)iova);
+}
+
+/* Hooks for memzone allocations/freeing used by ethdev dma-zone helpers. */
+void dbchecker_dma_zone_alloc_hook(const struct rte_memzone *mz)
+{
+    if (!mz || uio_map == NULL)
+        return;
+    dma_addr_t base = (dma_addr_t)mz->iova;
+    size_t len = mz->len;
+    if (base == 0 || len == 0)
+        return;
+    dma_addr_t new_iova = dbchecker_alloc_mtdt(base, len, DMA_BIDIRECTIONAL);
+    if (new_iova != (dma_addr_t)-1) {
+        /* update memzone iova so drivers program the device with the
+         * address that has associated MTDT metadata. Cast away const to
+         * update the internal memzone descriptor. */
+        struct rte_memzone *mz_nc = (struct rte_memzone *)mz;
+        mz_nc->iova = (rte_iova_t)new_iova;
+        DBCHECKER_DEBUG_LOG("dbchecker_dma_zone_alloc_hook: updated memzone '%s' iova 0x%llx -> 0x%llx\n",
+            mz->name, (unsigned long long)base, (unsigned long long)new_iova);
+    }
+}
+
+void dbchecker_dma_zone_free_hook(const struct rte_memzone *mz)
+{
+    if (!mz || uio_map == NULL || !mz->iova)
+        return;
+    struct rte_memzone *mz_nc = (struct rte_memzone *)mz;
+    mz_nc->iova = dbchecker_free_mtdt((dma_addr_t)mz_nc->iova);
+    DBCHECKER_DEBUG_LOG("dbchecker_dma_zone_free_hook: freed memzone '%s' iova 0x%llx\n",
+        mz_nc->name, (unsigned long long)mz_nc->iova);
 }
 
 /* If this file is compiled into a library for DPDK user applications,
