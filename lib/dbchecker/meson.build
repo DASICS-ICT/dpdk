@@ -7,7 +7,7 @@ if is_windows
     subdir_done()
 endif
 
-sources = files('dbchecker.c')
-headers = files('dbchecker.h')
+sources = files('rte_dbchecker.c')
+headers = files('rte_dbchecker.h')
 
 deps += ['mbuf']

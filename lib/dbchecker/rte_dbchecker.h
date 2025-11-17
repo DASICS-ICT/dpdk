@@ -5,8 +5,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-/* For rte_mbuf helpers/macros */
 #include <rte_mbuf.h>
+#include <rte_memzone.h>
 
 /* Minimal local replacements for kernel types used by original API */
 typedef uint64_t dma_addr_t;
@@ -81,7 +81,7 @@ struct dbchecker_en_ctrl {
   bool err_rpt;
 };
 
-#define DBCHECKER_DEBUG 0
+#define DBCHECKER_DEBUG 1
 
 #define DBCHECKER_DEBUG_LOG(fmt, args...) \
         do { \

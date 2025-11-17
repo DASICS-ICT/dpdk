@@ -22,7 +22,7 @@
 #include <sys/mman.h>
 
 /* public declarations and definitions */
-#include "dbchecker.h"
+#include "rte_dbchecker.h"
 
 /* UIO device file used to access registers */
 /* uio device path buffer (modifiable at runtime) */
@@ -127,15 +127,15 @@ int dbchecker_command(struct dbchecker_cmd *cmd){
     if (cmd == NULL)
         return -1;
 
-    DBCHECKER_DEBUG_LOG("DBCHECKER: issue command, op: 0x%x, imm: 0x%llx\n",
-        cmd->op, (unsigned long long)cmd->imm);
-    DBCHECKER_DEBUG_LOG("DBCHECKER: mtdt wr: 0x%x, dev: 0x%x, id: 0x%lx, up_bnd: 0x%llx, lo_bnd: 0x%llx\n",
-        cmd->mtdt.wr, cmd->mtdt.dev, (unsigned long)cmd->mtdt.id,
-        (unsigned long long)cmd->mtdt.up_bnd, (unsigned long long)cmd->mtdt.lo_bnd);
+    // DBCHECKER_DEBUG_LOG("DBCHECKER: issue command, op: 0x%x, imm: 0x%llx\n",
+        // cmd->op, (unsigned long long)cmd->imm);
+    // DBCHECKER_DEBUG_LOG("DBCHECKER: mtdt wr: 0x%x, dev: 0x%x, id: 0x%lx, up_bnd: 0x%llx, lo_bnd: 0x%llx\n",
+        // cmd->mtdt.wr, cmd->mtdt.dev, (unsigned long)cmd->mtdt.id,
+        // (unsigned long long)cmd->mtdt.up_bnd, (unsigned long long)cmd->mtdt.lo_bnd);
     uint64_t validated_cmd = (0x1UL << 62) |
                              ((uint64_t)(cmd->op & 0x3) << 60) |
                              (cmd->imm & 0x0FFFFFFFFFFFFFULL);
-    DBCHECKER_DEBUG_LOG("DBCHECKER: validated cmd: 0x%llx\n", (unsigned long long)validated_cmd);
+    // DBCHECKER_DEBUG_LOG("DBCHECKER: validated cmd: 0x%llx\n", (unsigned long long)validated_cmd);
     uint32_t cmd_status;
     if (cmd->op == DBCHECKER_OP_ALLOC) { // alloc
         uint64_t mtdt_lo = (cmd->mtdt.lo_bnd & 0xFFFFFFFFFFFFULL) |
@@ -143,8 +143,8 @@ int dbchecker_command(struct dbchecker_cmd *cmd){
 
         uint64_t mtdt_hi = ((cmd->mtdt.up_bnd & 0xFFFFFFFFFFFFULL) >> 16) |
                            ((uint64_t)(cmd->mtdt.wr & 0x3) << 62);
-        DBCHECKER_DEBUG_LOG("DBCHECKER: mtdt_lo: 0x%llx, mtdt_hi: 0x%llx\n",
-            (unsigned long long)mtdt_lo, (unsigned long long)mtdt_hi);
+        // DBCHECKER_DEBUG_LOG("DBCHECKER: mtdt_lo: 0x%llx, mtdt_hi: 0x%llx\n",
+            // (unsigned long long)mtdt_lo, (unsigned long long)mtdt_hi);
         uio_write64_lo_hi(mtdt_lo, DBCHECKER_MTDT_LO_OFFSET);
         uio_write64_lo_hi(mtdt_hi, DBCHECKER_MTDT_HI_OFFSET);
         /* ensure writes flushed by writing command high dword */
@@ -161,8 +161,8 @@ int dbchecker_command(struct dbchecker_cmd *cmd){
         fprintf(stderr, "DBCHECKER: command error, cmd: 0x%llx\n", (unsigned long long)validated_cmd);
         return -1;
     }
-    DBCHECKER_DEBUG_LOG("DBCHECKER: command completed, op: 0x%x, imm: 0x%llx\n",
-        cmd->op, (unsigned long long)cmd->imm);
+    // DBCHECKER_DEBUG_LOG("DBCHECKER: command completed, op: 0x%x, imm: 0x%llx\n",
+        // cmd->op, (unsigned long long)cmd->imm);
     return 0;
 }
 
@@ -200,20 +200,20 @@ dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_dire
     memset(&alloc_cmd, 0, sizeof(alloc_cmd));
     alloc_cmd.op = DBCHECKER_OP_ALLOC;
     alloc_cmd.mtdt = mtdt;
-    DBCHECKER_DEBUG_LOG("DBCHECKER: request alloc mtdt, lo: 0x%llx, up: 0x%llx\n",
-        (unsigned long long)mtdt.lo_bnd, (unsigned long long)mtdt.up_bnd);
+    // DBCHECKER_DEBUG_LOG("DBCHECKER: request alloc mtdt, lo: 0x%llx, up: 0x%llx\n",
+        // (unsigned long long)mtdt.lo_bnd, (unsigned long long)mtdt.up_bnd);
     if (!dbchecker_command(&alloc_cmd)) {
         uint32_t cmd_res = uio_read32(DBCHECKER_RES_OFFSET + 4);
         alloc_addr = (addr & 0xFFFFFFFFFFFFULL) | ((uint64_t)(cmd_res & 0xFFF00000) << 32); // new addr
-        DBCHECKER_DEBUG_LOG("DBCHECKER: construct alloc_addr: 0x%llx | 0x%llx\n",
-            (unsigned long long)(addr & 0xFFFFFFFFFFFFULL), (unsigned long long)((uint64_t)(cmd_res & 0xFFF00000) << 32));
+        // DBCHECKER_DEBUG_LOG("DBCHECKER: construct alloc_addr: 0x%llx | 0x%llx\n",
+            // (unsigned long long)(addr & 0xFFFFFFFFFFFFULL), (unsigned long long)((uint64_t)(cmd_res & 0xFFF00000) << 32));
         /* store copy of mtdt */
         size_t idx = (cmd_res >> 20) & (MAX_DBTE_TABLE_SIZE - 1);
         struct dbchecker_mtdt *copy = malloc(sizeof(*copy));
         if (copy) *copy = mtdt;
         dbte_table[idx] = copy;
-        DBCHECKER_DEBUG_LOG("DBCHECKER: alloc addr: 0x%llx, save metadata idx %zu\n",
-            (unsigned long long)alloc_addr, idx);
+        // DBCHECKER_DEBUG_LOG("DBCHECKER: alloc addr: 0x%llx, save metadata idx %zu\n",
+        //     (unsigned long long)alloc_addr, idx);
         return alloc_addr;
     } else
         return -1;
@@ -228,7 +228,7 @@ dma_addr_t dbchecker_free_mtdt(dma_addr_t addr){
     free_cmd.op = DBCHECKER_OP_FREE;
     free_cmd.imm = (((addr >> 52) & 0xFFF) << 40)  | (addr & 0xFFFFFFFFULL);
     dbchecker_command(&free_cmd);
-    DBCHECKER_DEBUG_LOG("DBCHECKER: free addr: 0x%llx\n", (unsigned long long)addr);
+    // DBCHECKER_DEBUG_LOG("DBCHECKER: free addr: 0x%llx\n", (unsigned long long)addr);
     size_t idx = (addr >> 52) & (MAX_DBTE_TABLE_SIZE - 1);
     if (dbte_table[idx]) {
         free(dbte_table[idx]);
@@ -365,17 +365,6 @@ void dbchecker_exit(void)
     printf("DBCHECKER (userspace): exit\n");
 }
 
-/* strong hooks used by mbuf layer: these override the weak no-op hooks
- * defined in lib/mbuf/rte_mbuf.c when this translation unit is linked.
- * They call the dbchecker alloc/free helpers to allocate/free MTDT for
- * the mbuf buffer region and update mbuf IOVA accordingly.
- */
-/* Provide explicit init/exit hook symbols to be called from EAL.
- * They are implemented as thin wrappers around dbchecker_init/exit so
- * EAL can call consistent "hook" symbols; the symbols are weak in
- * this TU only if lib/dbchecker is not linked (not required but kept
- * explicit here).
- */
 int dbchecker_module_init_hook(void)
 {
     /* use default device discovery behavior */
