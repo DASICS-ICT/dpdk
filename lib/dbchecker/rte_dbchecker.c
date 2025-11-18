@@ -82,50 +82,40 @@ static int find_uio_device_by_name(const char *target_name, char *out_dev, size_
 static uint32_t uio_read32(off_t offset)
 {
     if (!uio_map) return 0;
-    pthread_mutex_lock(&uio_mmio_lock);
     volatile uint32_t *p = (volatile uint32_t *)((char *)uio_map + offset);
     uint32_t v = *p;
-    pthread_mutex_unlock(&uio_mmio_lock);
     return v;
 }
 
 static void uio_write32(off_t offset, uint32_t v)
 {
     if (!uio_map) return;
-    pthread_mutex_lock(&uio_mmio_lock);
     volatile uint32_t *p = (volatile uint32_t *)((char *)uio_map + offset);
     *p = v;
-    pthread_mutex_unlock(&uio_mmio_lock);
 }
 
 /* write 64 as lo/hi 32 at offset and offset+4 */
 static void uio_write64_lo_hi(uint64_t v, off_t offset)
 {
     if (!uio_map) return;
-    pthread_mutex_lock(&uio_mmio_lock);
     volatile uint32_t *plo = (volatile uint32_t *)((char *)uio_map + offset);
     volatile uint32_t *phi = (volatile uint32_t *)((char *)uio_map + offset + 4);
     *plo = (uint32_t)(v & 0xFFFFFFFFULL);
     *phi = (uint32_t)((v >> 32) & 0xFFFFFFFFULL);
-    pthread_mutex_unlock(&uio_mmio_lock);
 }
 
 /* read 64 from lo/hi 32 at offset and offset+4 */
 static uint64_t uio_read64_lo_hi(off_t offset)
 {
     if (!uio_map) return 0;
-    pthread_mutex_lock(&uio_mmio_lock);
     volatile uint32_t *plo = (volatile uint32_t *)((char *)uio_map + offset);
     volatile uint32_t *phi = (volatile uint32_t *)((char *)uio_map + offset + 4);
     uint32_t lo = *plo;
     uint32_t hi = *phi;
-    pthread_mutex_unlock(&uio_mmio_lock);
     return ((uint64_t)hi << 32) | lo;
 }
 
 int dbchecker_command(struct dbchecker_cmd *cmd){
-    if (cmd == NULL)
-        return -1;
 
     // DBCHECKER_DEBUG_LOG("DBCHECKER: issue command, op: 0x%x, imm: 0x%llx\n",
         // cmd->op, (unsigned long long)cmd->imm);
@@ -145,11 +135,13 @@ int dbchecker_command(struct dbchecker_cmd *cmd){
                            ((uint64_t)(cmd->mtdt.wr & 0x3) << 62);
         // DBCHECKER_DEBUG_LOG("DBCHECKER: mtdt_lo: 0x%llx, mtdt_hi: 0x%llx\n",
             // (unsigned long long)mtdt_lo, (unsigned long long)mtdt_hi);
+        pthread_mutex_lock(&uio_mmio_lock);
         uio_write64_lo_hi(mtdt_lo, DBCHECKER_MTDT_LO_OFFSET);
         uio_write64_lo_hi(mtdt_hi, DBCHECKER_MTDT_HI_OFFSET);
         /* ensure writes flushed by writing command high dword */
         uio_write32(DBCHECKER_CMD_OFFSET + 4, (uint32_t)((validated_cmd >> 32) & 0xFFFFFFFF));
     } else {
+        pthread_mutex_lock(&uio_mmio_lock);
         uio_write64_lo_hi(validated_cmd, DBCHECKER_CMD_OFFSET);
     }
 
@@ -158,11 +150,13 @@ int dbchecker_command(struct dbchecker_cmd *cmd){
     } while (cmd_status == DBCHECKER_CMD_REQUEST);
 
     if (cmd_status == DBCHECKER_CMD_ERROR) {
+        pthread_mutex_unlock(&uio_mmio_lock);
         fprintf(stderr, "DBCHECKER: command error, cmd: 0x%llx\n", (unsigned long long)validated_cmd);
         return -1;
     }
     // DBCHECKER_DEBUG_LOG("DBCHECKER: command completed, op: 0x%x, imm: 0x%llx\n",
         // cmd->op, (unsigned long long)cmd->imm);
+    pthread_mutex_unlock(&uio_mmio_lock);
     return 0;
 }
 

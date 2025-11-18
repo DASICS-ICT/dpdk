@@ -81,7 +81,7 @@ struct dbchecker_en_ctrl {
   bool err_rpt;
 };
 
-#define DBCHECKER_DEBUG 1
+#define DBCHECKER_DEBUG 0
 
 #define DBCHECKER_DEBUG_LOG(fmt, args...) \
         do { \
