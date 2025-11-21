@@ -32,10 +32,10 @@ static int uio_fd = -1;
 /* mmap'ed region base and size */
 static void *uio_map = NULL;
 static size_t uio_map_size = 0;
-static pthread_t err_thread;
-static volatile bool err_thread_running = false;
+// static pthread_t err_thread;
+// static volatile bool err_thread_running = false;
 /* mutex to protect MMIO (uio_map) access across threads/cores */
-static pthread_mutex_t uio_mmio_lock = PTHREAD_MUTEX_INITIALIZER;
+// static pthread_mutex_t uio_mmio_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* store allocated metadata copies to avoid referencing stack addresses */
 static struct dbchecker_mtdt *dbte_table[MAX_DBTE_TABLE_SIZE];
@@ -135,13 +135,13 @@ int dbchecker_command(struct dbchecker_cmd *cmd){
                            ((uint64_t)(cmd->mtdt.wr & 0x3) << 62);
         // DBCHECKER_DEBUG_LOG("DBCHECKER: mtdt_lo: 0x%llx, mtdt_hi: 0x%llx\n",
             // (unsigned long long)mtdt_lo, (unsigned long long)mtdt_hi);
-        pthread_mutex_lock(&uio_mmio_lock);
+        // pthread_mutex_lock(&uio_mmio_lock);
         uio_write64_lo_hi(mtdt_lo, DBCHECKER_MTDT_LO_OFFSET);
         uio_write64_lo_hi(mtdt_hi, DBCHECKER_MTDT_HI_OFFSET);
         /* ensure writes flushed by writing command high dword */
         uio_write32(DBCHECKER_CMD_OFFSET + 4, (uint32_t)((validated_cmd >> 32) & 0xFFFFFFFF));
     } else {
-        pthread_mutex_lock(&uio_mmio_lock);
+        // pthread_mutex_lock(&uio_mmio_lock);
         uio_write64_lo_hi(validated_cmd, DBCHECKER_CMD_OFFSET);
     }
 
@@ -150,13 +150,13 @@ int dbchecker_command(struct dbchecker_cmd *cmd){
     } while (cmd_status == DBCHECKER_CMD_REQUEST);
 
     if (cmd_status == DBCHECKER_CMD_ERROR) {
-        pthread_mutex_unlock(&uio_mmio_lock);
+        // pthread_mutex_unlock(&uio_mmio_lock);
         fprintf(stderr, "DBCHECKER: command error, cmd: 0x%llx\n", (unsigned long long)validated_cmd);
         return -1;
     }
     // DBCHECKER_DEBUG_LOG("DBCHECKER: command completed, op: 0x%x, imm: 0x%llx\n",
         // cmd->op, (unsigned long long)cmd->imm);
-    pthread_mutex_unlock(&uio_mmio_lock);
+    // pthread_mutex_unlock(&uio_mmio_lock);
     return 0;
 }
 
@@ -247,15 +247,15 @@ int dbchecker_err_handler(void){
     return 0;
 }
 
-static void *err_thread_fn(void *arg)
-{
-    (void)arg;
-    while (err_thread_running) {
-        dbchecker_err_handler();
-        usleep(1000 * 1000); /* 1000 ms */
-    }
-    return NULL;
-}
+// static void *err_thread_fn(void *arg)
+// {
+//     (void)arg;
+//     while (err_thread_running) {
+//         dbchecker_err_handler();
+//         usleep(1000 * 1000); /* 1000 ms */
+//     }
+//     return NULL;
+// }
 
 /* Initialize user-space DBChecker (open UIO, start poll thread) */
 int dbchecker_init(const char *dev)
@@ -311,14 +311,14 @@ int dbchecker_init(const char *dev)
 
     memset(dbte_table, 0, sizeof(dbte_table));
 
-    err_thread_running = true;
-    if (pthread_create(&err_thread, NULL, err_thread_fn, NULL) != 0) {
-        perror("pthread_create");
-        close(uio_fd);
-        uio_fd = -1;
-        err_thread_running = false;
-        return -1;
-    }
+    // err_thread_running = true;
+    // if (pthread_create(&err_thread, NULL, err_thread_fn, NULL) != 0) {
+    //     perror("pthread_create");
+    //     close(uio_fd);
+    //     uio_fd = -1;
+    //     err_thread_running = false;
+    //     return -1;
+    // }
 
     struct dbchecker_en_ctrl ctrl = {
         .byp_dev_bm = 0xFFFE, /* bypass all devices except device 0 */
@@ -341,10 +341,10 @@ void dbchecker_exit(void)
     ctrl.func_en = false;
     dbchecker_en_set(&ctrl);
 
-    if (err_thread_running) {
-        err_thread_running = false;
-        pthread_join(err_thread, NULL);
-    }
+    // if (err_thread_running) {
+    //     err_thread_running = false;
+    //     pthread_join(err_thread, NULL);
+    // }
 
     if (uio_map) {
         munmap(uio_map, uio_map_size);
@@ -380,6 +380,16 @@ void dbchecker_alloc_mtdt_hook(struct rte_mbuf *m)
     size_t len = (size_t)m->buf_len;
     if (base == 0 || len == 0)
         return;
+    /* If IOVA already appears translated (DBChecker encodes table index
+     * in high bits), avoid double-allocating metadata for the same buffer.
+     * This makes the hook idempotent when it is accidentally called twice.
+     */
+    if (((uint64_t)base >> 52) != 0) {
+        DBCHECKER_DEBUG_LOG("dbchecker_alloc_mtdt_hook: mbuf iova already translated 0x%llx, skipping\n",
+            (unsigned long long)base);
+        return;
+    }
+
     dma_addr_t new_iova = dbchecker_alloc_mtdt(base, len, DMA_BIDIRECTIONAL);
     if (new_iova != (dma_addr_t)-1) {
         rte_mbuf_iova_set(m, new_iova);
@@ -397,6 +407,15 @@ void dbchecker_free_mtdt_hook(struct rte_mbuf *m)
     dma_addr_t iova = (dma_addr_t)rte_mbuf_iova_get(m);
     if (iova == 0)
         return;
+    /* If IOVA does not contain DBChecker translation bits, skip free.
+     * This avoids double-freeing metadata if the hook was called more than once.
+     */
+    if (((uint64_t)iova >> 52) == 0) {
+        DBCHECKER_DEBUG_LOG("dbchecker_free_mtdt_hook: mbuf iova not translated 0x%llx, skipping\n",
+            (unsigned long long)iova);
+        return;
+    }
+
     rte_mbuf_iova_set(m, dbchecker_free_mtdt(iova));
     DBCHECKER_DEBUG_LOG("dbchecker_free_mtdt_hook: freed mbuf iova 0x%llx\n",
         (unsigned long long)iova);

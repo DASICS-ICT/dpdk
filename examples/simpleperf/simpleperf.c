@@ -20,19 +20,22 @@
 #include <rte_ether.h>
 #include <signal.h>
 #include <rte_atomic.h>
+#include <rte_ring.h>
 
-#define NUM_MBUFS  16384
+extern int dbchecker_err_handler(void) __attribute__((weak));
+
+#define NUM_MBUFS 16384
 #define MBUF_CACHE_SIZE 250
 #define DEFAULT_BURST_SIZE 128
 #define DEFAULT_PKT_SIZE 64
 #define DEFAULT_SECONDS 3600
+#define RING_SIZE 2048
 
 static uint16_t g_port_id = 0;
 static uint16_t g_queue_id = 0;
 static uint32_t g_burst = DEFAULT_BURST_SIZE;
 static uint32_t g_pkt_size = DEFAULT_PKT_SIZE;
 static uint32_t g_seconds = DEFAULT_SECONDS;
-static uint32_t g_print_interval_ms = 1000; /* printing interval in milliseconds */
 static int g_mode_tx = 1; /* default TX */
 static struct rte_ether_addr g_dst_mac;
 static int g_have_dst_mac = 0;
@@ -45,11 +48,15 @@ struct perf_stats {
 };
 
 /* shared stats for multi-core mode */
-static rte_atomic64_t g_total_packets;
-static rte_atomic64_t g_total_bytes;
+static volatile uint64_t g_total_packets = 0;
+static volatile uint64_t g_total_bytes = 0;
 static volatile uint64_t g_start_tsc = 0;
 static volatile uint64_t g_end_tsc = 0;
-static rte_atomic64_t g_worker_done;
+static volatile int g_worker_done = 0;
+static struct rte_ring *g_tx_ring = NULL;
+static struct rte_ring *g_free_ring = NULL;
+static struct rte_mempool *g_mp = NULL; /* global mempool for main core */
+
 
 static void usage(const char *prg)
 {
@@ -89,10 +96,6 @@ static void parse_app_args(int argc, char **argv)
             if (parse_mac(argv[++i], &g_dst_mac) == 0)
                 g_have_dst_mac = 1;
         }
-        else if (strcmp(argv[i], "--interval-ms") == 0 && i + 1 < argc) {
-            g_print_interval_ms = (uint32_t)atoi(argv[++i]);
-            if (g_print_interval_ms == 0) g_print_interval_ms = 1000;
-        }
         else {
             usage(argv[0]);
             rte_exit(EXIT_FAILURE, "Invalid argument: %s\n", argv[i]);
@@ -110,21 +113,6 @@ static void print_stats(const char *title, struct perf_stats *s, uint32_t pkt_si
     printf("Total packets: %" PRIu64 "\n", s->total_packets);
     printf("Total bytes:   %" PRIu64 "\n", s->total_bytes);
     printf("Duration:      %.6f s\n", seconds);
-    printf("Bandwidth:     %.3f Mbps\n", mbps);
-    printf("Throughput:    %.2f pkt/s\n", pps);
-    printf("Pkt size:      %u bytes\n", pkt_size);
-    printf("============================\n");
-}
-
-/* print instantaneous stats for the last interval (delta values) */
-static void print_instant_stats(const char *title, uint64_t delta_bytes, uint64_t delta_packets, double interval_s, uint32_t pkt_size)
-{
-    double mbps = interval_s > 0.0 ? (double)delta_bytes * 8.0 / (interval_s * 1e6) : 0.0;
-    double pps = interval_s > 0.0 ? (double)delta_packets / interval_s : 0.0;
-    printf("\n===== %s (instant) =====\n", title);
-    printf("Bytes (this interval): %" PRIu64 "\n", delta_bytes);
-    printf("Packets (this interval): %" PRIu64 "\n", delta_packets);
-    printf("Interval:      %.6f s\n", interval_s);
     printf("Bandwidth:     %.3f Mbps\n", mbps);
     printf("Throughput:    %.2f pkt/s\n", pps);
     printf("Pkt size:      %u bytes\n", pkt_size);
@@ -160,255 +148,63 @@ static int port_init(uint16_t port, struct rte_mempool *mp)
     return 0;
 }
 
-static void do_tx(struct rte_mempool *mp)
-{
-    struct perf_stats st = {0};
-    struct rte_mbuf **bufs = NULL;
-    uint32_t burst = g_burst > 1024 ? 1024 : g_burst;
-    uint32_t frame_len = g_pkt_size < 64 ? 64 : g_pkt_size;
-
-    bufs = malloc(sizeof(struct rte_mbuf *) * burst);
-    if (!bufs) rte_exit(EXIT_FAILURE, "malloc failed\n");
-
-    struct rte_ether_addr src_mac;
-    rte_eth_macaddr_get(g_port_id, &src_mac);
-    if (!g_have_dst_mac) memset(&g_dst_mac, 0xFF, sizeof(g_dst_mac));
-
-    uint64_t tsc_hz = rte_get_tsc_hz();
-    uint64_t now;
-    uint64_t next_print = 0; /* set when transmission starts */
-    uint64_t deadline = 0; /* set when transmission starts */
-    int started = 0; /* becomes 1 when first tx_burst returns >0 */
-    uint64_t last_print_tsc = 0;
-    uint64_t last_total_packets = 0;
-    uint64_t last_total_bytes = 0;
-    st.start_tsc = 0;
-
-    for (;;) {
-        now = rte_rdtsc();
-        if (g_stop) {
-            /* print stats on Ctrl-C */
-            st.end_tsc = rte_rdtsc();
-            printf("\nReceived SIGINT, printing final TX stats:\n");
-            print_stats("TX Throughput Statistics", &st, frame_len);
-            break;
-        }
-        /* if transmission has started, handle per-second printing and deadline */
-        if (started) {
-            if (now >= next_print) {
-                /* ensure we don't miss multiple seconds */
-                next_print += tsc_hz * ((now - next_print) / tsc_hz + 1);
-                printf("\033[2J\033[H"); /* clear screen and move cursor home */
-                fflush(stdout);
-                double interval_s = (double)(now - last_print_tsc) / (double)tsc_hz;
-                uint64_t delta_packets = st.total_packets - last_total_packets;
-                uint64_t delta_bytes = st.total_bytes - last_total_bytes;
-                print_instant_stats("TX Live Statistics", delta_bytes, delta_packets, interval_s, frame_len);
-                last_print_tsc = now;
-                last_total_packets = st.total_packets;
-                last_total_bytes = st.total_bytes;
-            }
-            if (now >= deadline)
-                break;
-        }
-
-        if (rte_pktmbuf_alloc_bulk(mp, bufs, burst) != 0) {
-            /* allocation failed; if not started, just spin and retry */
-            continue;
-        }
-        /* build frames: append payload/headroom and populate header */
-        for (uint32_t i = 0; i < burst; i++) {
-            struct rte_mbuf *m = bufs[i];
-            /* append the full frame length and get pointer to start */
-            char *pkt = (char *)rte_pktmbuf_append(m, frame_len);
-            if (pkt == NULL) {
-                rte_pktmbuf_free(m);
-                bufs[i] = NULL;
-                continue;
-            }
-            /* populate ethernet header at packet start */
-            struct rte_ether_hdr *eth = (struct rte_ether_hdr *)pkt;
-            rte_ether_addr_copy(&g_dst_mac, &eth->dst_addr);
-            rte_ether_addr_copy(&src_mac, &eth->src_addr);
-            eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
-        }
-        /* compact valid bufs */
-        uint32_t valid = 0;
-        for (uint32_t i = 0; i < burst; i++) if (bufs[i]) bufs[valid++] = bufs[i];
-        if (valid == 0) continue;
-
-        uint32_t sent = 0;
-        while (sent < valid) {
-            uint16_t n = rte_eth_tx_burst(g_port_id, g_queue_id, &bufs[sent], valid - sent);
-            if (n == 0)
-                break;
-            /* on first successful tx, mark start and initialize timers */
-            if (!started) {
-                uint64_t t = rte_rdtsc();
-                started = 1;
-                st.start_tsc = t;
-                deadline = st.start_tsc + (uint64_t)g_seconds * tsc_hz;
-                next_print = st.start_tsc + tsc_hz;
-                last_print_tsc = st.start_tsc;
-                last_total_packets = 0;
-                last_total_bytes = 0;
-            }
-            /* count only after successful tx_burst */
-            st.total_packets += n;
-            st.total_bytes += (uint64_t)n * frame_len;
-            /* update shared counters for multi-core printer if enabled */
-            rte_atomic64_add(&g_total_packets, n);
-            rte_atomic64_add(&g_total_bytes, (int64_t)((uint64_t)n * frame_len));
-            /* set global start timestamp once */
-            rte_atomic64_cmpset((volatile uint64_t *)&g_start_tsc, 0, st.start_tsc);
-            sent += n;
-        }
-        for (uint32_t i = sent; i < valid; i++) rte_pktmbuf_free(bufs[i]);
-    }
-    if (!g_stop) {
-        st.end_tsc = rte_rdtsc();
-        printf("\033[2J\033[H");
-        fflush(stdout);
-        print_stats("TX Throughput Statistics", &st, frame_len);
-    }
-    free(bufs);
-}
-
-static void do_rx(void)
-{
-    struct perf_stats st = {0};
-    struct rte_mbuf *bufs[1024];
-    uint32_t burst = g_burst > 1024 ? 1024 : g_burst;
-
-    uint64_t tsc_hz = rte_get_tsc_hz();
-    uint64_t now;
-    uint64_t next_print = 0; /* set when reception starts */
-    uint64_t deadline = 0; /* set when reception starts */
-    int started = 0; /* becomes 1 when first rx_burst returns >0 */
-    st.start_tsc = 0;
-    uint64_t last_print_tsc = 0;
-    uint64_t last_total_packets = 0;
-    uint64_t last_total_bytes = 0;
-
-    for (;;) {
-        now = rte_rdtsc();
-        /* if reception has started, handle per-second printing and deadline */
-        if (g_stop) {
-            st.end_tsc = rte_rdtsc();
-            printf("\nReceived SIGINT, printing final RX stats:\n");
-            print_stats("RX Throughput Statistics", &st, 0);
-            break;
-        }
-        if (started) {
-            if (now >= next_print) {
-                next_print += tsc_hz * ((now - next_print) / tsc_hz + 1);
-                printf("\033[2J\033[H");
-                fflush(stdout);
-                double interval_s = (double)(now - last_print_tsc) / (double)tsc_hz;
-                uint64_t delta_packets = st.total_packets - last_total_packets;
-                uint64_t delta_bytes = st.total_bytes - last_total_bytes;
-                print_instant_stats("RX Live Statistics", delta_bytes, delta_packets, interval_s, 0);
-                last_print_tsc = now;
-                last_total_packets = st.total_packets;
-                last_total_bytes = st.total_bytes;
-            }
-            if (now >= deadline)
-                break;
-        }
-
-        uint16_t nb = rte_eth_rx_burst(g_port_id, g_queue_id, bufs, burst);
-        if (nb == 0) {
-            /* no packets this iteration */
-            continue;
-        }
-        /* on first successful rx, mark start and initialize timers */
-        if (!started) {
-            started = 1;
-            st.start_tsc = now;
-            deadline = st.start_tsc + (uint64_t)g_seconds * tsc_hz;
-            next_print = st.start_tsc + tsc_hz;
-            last_print_tsc = st.start_tsc;
-            last_total_packets = 0;
-            last_total_bytes = 0;
-        }
-        for (uint16_t i = 0; i < nb; i++) {
-            uint64_t len = rte_pktmbuf_pkt_len(bufs[i]);
-            st.total_packets++;
-            st.total_bytes += len;
-            /* update shared counters for multi-core printer if enabled */
-            rte_atomic64_add(&g_total_packets, 1);
-            rte_atomic64_add(&g_total_bytes, (int64_t)len);
-            rte_pktmbuf_free(bufs[i]);
-        }
-    }
-    if (!g_stop) {
-        st.end_tsc = rte_rdtsc();
-        printf("\033[2J\033[H");
-        fflush(stdout);
-        print_stats("RX Throughput Statistics", &st, 0);
-    }
-}
-
 /* worker versions for multi-core mode (no printing) */
 static int tx_worker(void *arg)
 {
-    struct rte_mempool *mp = arg;
-    struct rte_mbuf **bufs = NULL;
+    (void)arg;
+    struct rte_mbuf *bufs[1024];
     uint32_t burst = g_burst > 1024 ? 1024 : g_burst;
     uint32_t frame_len = g_pkt_size < 64 ? 64 : g_pkt_size;
-    struct rte_ether_addr src_mac;
-
-    bufs = malloc(sizeof(struct rte_mbuf *) * burst);
-    if (!bufs) rte_exit(EXIT_FAILURE, "malloc failed\n");
-
-    rte_eth_macaddr_get(g_port_id, &src_mac);
-    if (!g_have_dst_mac) memset(&g_dst_mac, 0xFF, sizeof(g_dst_mac));
 
     uint64_t tsc_hz = rte_get_tsc_hz();
     uint64_t deadline = 0;
     int started = 0;
+    uint64_t local_packets = 0;
+    uint64_t local_bytes = 0;
 
     while (!g_stop) {
-        if (rte_pktmbuf_alloc_bulk(mp, bufs, burst) != 0)
+        uint16_t nb = rte_ring_dequeue_burst(g_tx_ring, (void **)bufs, burst, NULL);
+        if (nb == 0) {
             continue;
-        for (uint32_t i = 0; i < burst; i++) {
-            struct rte_mbuf *m = bufs[i];
-            char *pkt = (char *)rte_pktmbuf_append(m, frame_len);
-            if (pkt == NULL) {
-                rte_pktmbuf_free(m);
-                bufs[i] = NULL;
-                continue;
-            }
-            struct rte_ether_hdr *eth = (struct rte_ether_hdr *)pkt;
-            rte_ether_addr_copy(&g_dst_mac, &eth->dst_addr);
-            rte_ether_addr_copy(&src_mac, &eth->src_addr);
-            eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
         }
-        uint32_t valid = 0;
-        for (uint32_t i = 0; i < burst; i++) if (bufs[i]) bufs[valid++] = bufs[i];
-        if (valid == 0) continue;
-
-        uint32_t sent = 0;
-        while (sent < valid) {
-            uint16_t n = rte_eth_tx_burst(g_port_id, g_queue_id, &bufs[sent], valid - sent);
+        uint16_t sent = 0;
+        /* try to send all dequeued mbufs, allow partial successes */
+        while (sent < nb) {
+            uint16_t n = rte_eth_tx_burst(g_port_id, g_queue_id, &bufs[sent], nb - sent);
             if (n == 0) break;
             if (!started) {
                 uint64_t t = rte_rdtsc();
                 started = 1;
-                rte_atomic64_cmpset((volatile uint64_t *)&g_start_tsc, 0, t);
+                if (g_start_tsc == 0) g_start_tsc = t;
                 deadline = g_start_tsc + (uint64_t)g_seconds * tsc_hz;
             }
-            rte_atomic64_add(&g_total_packets, n);
-            rte_atomic64_add(&g_total_bytes, (int64_t)((uint64_t)n * frame_len));
             sent += n;
+            local_packets += n;
+            local_bytes += (uint64_t)n * frame_len;
         }
-        for (uint32_t i = sent; i < valid; i++) rte_pktmbuf_free(bufs[i]);
+        /* any unsent mbufs must be returned to main core for freeing */
+        if (sent < nb) {
+            uint16_t remaining = nb - sent;
+            /* try to enqueue unsent mbufs to free_ring; retry until enqueued */
+            uint16_t off = sent;
+            while (remaining > 0) {
+                uint16_t enq = rte_ring_enqueue_burst(g_free_ring, (void **)&bufs[off], remaining, NULL);
+                if (enq == 0) {
+                    rte_delay_us_sleep(1);
+                    continue;
+                }
+                off += enq;
+                remaining -= enq;
+            }
+        }
         if (started && rte_rdtsc() >= deadline)
             break;
     }
     g_end_tsc = rte_rdtsc();
-    rte_atomic64_set(&g_worker_done, 1);
-    free(bufs);
+    /* publish local counters to globals once (no atomics) */
+    g_total_packets = local_packets;
+    g_total_bytes = local_bytes;
+    g_worker_done = 1;
     return 0;
 }
 
@@ -420,27 +216,35 @@ static int rx_worker(void *arg)
     uint64_t tsc_hz = rte_get_tsc_hz();
     uint64_t deadline = 0;
     int started = 0;
+    uint64_t local_packets = 0;
+    uint64_t local_bytes = 0;
 
     while (!g_stop) {
         uint16_t nb = rte_eth_rx_burst(g_port_id, g_queue_id, bufs, burst);
-        if (nb == 0) continue;
+        if (nb == 0) {
+            continue;
+        }
         if (!started) {
             uint64_t t = rte_rdtsc();
             started = 1;
-            rte_atomic64_cmpset((volatile uint64_t *)&g_start_tsc, 0, t);
+            if (g_start_tsc == 0) g_start_tsc = t;
             deadline = g_start_tsc + (uint64_t)g_seconds * tsc_hz;
         }
-        for (uint16_t i = 0; i < nb; i++) {
-            uint64_t len = rte_pktmbuf_pkt_len(bufs[i]);
-            rte_atomic64_add(&g_total_packets, 1);
-            rte_atomic64_add(&g_total_bytes, (int64_t)len);
-            rte_pktmbuf_free(bufs[i]);
-        }
+        /* count and free received mbufs locally to ensure RX-side alloc/free on same thread */
+        uint64_t totlen = 0;
+        for (uint16_t i = 0; i < nb; i++) totlen += rte_pktmbuf_pkt_len(bufs[i]);
+        local_packets += nb;
+        local_bytes += totlen;
+        /* free received mbufs in bulk */
+        rte_pktmbuf_free_bulk(bufs, nb);
         if (started && rte_rdtsc() >= deadline)
             break;
     }
     g_end_tsc = rte_rdtsc();
-    rte_atomic64_set(&g_worker_done, 1);
+    /* publish RX counters to globals (no atomics) */
+    g_total_packets = local_packets;
+    g_total_bytes = local_bytes;
+    g_worker_done = 1;
     return 0;
 }
 
@@ -472,6 +276,14 @@ int main(int argc, char **argv)
         MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
     if (mp == NULL) rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 
+    /* store global mempool and create rings for inter-lcore comms */
+    g_mp = mp;
+    g_tx_ring = rte_ring_create("tx_ring", RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if (g_tx_ring == NULL) rte_exit(EXIT_FAILURE, "Failed to create tx_ring\n");
+    /* rx_ring removed: rx_worker now frees received mbufs locally */
+    g_free_ring = rte_ring_create("free_ring", RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if (g_free_ring == NULL) rte_exit(EXIT_FAILURE, "Failed to create free_ring\n");
+
     if (port_init(g_port_id, mp) < 0) rte_exit(EXIT_FAILURE, "Cannot init port %u\n", g_port_id);
 
     /* wait for link up (try up to 30 seconds) to increase chance first tx_burst succeeds) */
@@ -495,19 +307,17 @@ int main(int argc, char **argv)
             printf("Port %u: link not up after %u seconds, continuing anyway\n", g_port_id, wait_secs);
     }
 
-    printf("Starting %s test on port %u queue %u burst=%u size=%u s=%u\n",
+    printf("Starting %s test on port %u queue %u burst=%u size=%u s=%u...  ",
         g_mode_tx ? "TX" : "RX", g_port_id, g_queue_id, g_burst, g_pkt_size, g_seconds);
 
-    /* initialize shared atomics */
-    rte_atomic64_init(&g_total_packets);
-    rte_atomic64_init(&g_total_bytes);
-    rte_atomic64_init(&g_worker_done);
-    rte_atomic64_set(&g_total_packets, 0);
-    rte_atomic64_set(&g_total_bytes, 0);
-    rte_atomic64_set(&g_worker_done, 0);
+    /* initialize shared counters (published by worker at end) */
+    g_total_packets = 0;
+    g_total_bytes = 0;
+    g_worker_done = 0;
     g_start_tsc = 0;
     g_end_tsc = 0;
-
+    const char spinner[] = "|/-\\";
+    size_t spinner_idx = 0;
     unsigned int lcore_count = rte_lcore_count();
     if (lcore_count >= 2) {
         /* multi-core: launch worker on a secondary lcore and use main core as printer */
@@ -519,52 +329,86 @@ int main(int argc, char **argv)
             err = rte_eal_remote_launch(rx_worker, mp, worker_lcore);
         if (err) rte_exit(EXIT_FAILURE, "Failed to launch worker on lcore %u\n", worker_lcore);
 
-        /* printer loop on main lcore */
-        uint64_t hz = rte_get_tsc_hz();
-        uint64_t interval_tsc = (uint64_t)g_print_interval_ms * hz / 1000ULL;
-        uint64_t last_tsc = rte_rdtsc();
-        uint64_t next_print = last_tsc + interval_tsc;
-        uint64_t last_packets = 0, last_bytes = 0;
-        double interval_s = (double)g_print_interval_ms / 1000.0;
+        struct rte_mbuf *mbufs[1024];
+        struct rte_ether_addr src_mac;
+        if (g_mode_tx) rte_eth_macaddr_get(g_port_id, &src_mac);
 
-        /* printer loop: prints every g_print_interval_ms regardless of worker activity */
-        while (!g_stop && rte_atomic64_read(&g_worker_done) == 0) {
-            uint64_t now = rte_rdtsc();
-            if (now >= next_print) {
-                uint64_t total_packets = (uint64_t)rte_atomic64_read(&g_total_packets);
-                uint64_t total_bytes = (uint64_t)rte_atomic64_read(&g_total_bytes);
-                uint64_t delta_packets = total_packets - last_packets;
-                uint64_t delta_bytes = total_bytes - last_bytes;
-                printf("\033[2J\033[H");
-                fflush(stdout);
-                print_instant_stats(g_mode_tx ? "TX Live Statistics" : "RX Live Statistics",
-                                   delta_bytes, delta_packets, interval_s, g_mode_tx ? g_pkt_size : 0);
-                last_tsc = now;
-                last_packets = total_packets;
-                last_bytes = total_bytes;
-                next_print += interval_tsc;
+        /* Lightweight main loop: produce TX mbufs (if TX) and show a spinner
+         * to indicate liveness. Avoid per-interval expensive computations and atomics.
+         */
+        while (!g_stop && g_worker_done == 0) {
+            /* TX producer: prepare packets and enqueue to tx_ring (no counting) */
+            if (g_mode_tx) {
+                uint32_t produce = g_burst > 1024 ? 1024 : g_burst;
+                if (rte_pktmbuf_alloc_bulk(g_mp, mbufs, produce) == 0) {
+                    uint32_t frame_len = g_pkt_size < 64 ? 64 : g_pkt_size;
+                    struct rte_mbuf *bad_bufs[1024];
+                    uint32_t bad = 0;
+                    for (uint32_t i = 0; i < produce; i++) {
+                        struct rte_mbuf *m = mbufs[i];
+                        char *pkt = (char *)rte_pktmbuf_append(m, frame_len);
+                        if (pkt == NULL) {
+                            bad_bufs[bad++] = m;
+                            mbufs[i] = NULL;
+                            continue;
+                        }
+                        struct rte_ether_hdr *eth = (struct rte_ether_hdr *)pkt;
+                        if (!g_have_dst_mac) memset(&g_dst_mac, 0xFF, sizeof(g_dst_mac));
+                        rte_ether_addr_copy(&g_dst_mac, &eth->dst_addr);
+                        rte_ether_addr_copy(&src_mac, &eth->src_addr);
+                        eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
+                    }
+                    /* compact valid pointers */
+                    uint32_t valid = 0;
+                    for (uint32_t i = 0; i < produce; i++) if (mbufs[i]) mbufs[valid++] = mbufs[i];
+                    /* free any bad mbufs in bulk */
+                    if (bad > 0) rte_pktmbuf_free_bulk(bad_bufs, bad);
+                    if (valid > 0) {
+                        uint16_t enq = rte_ring_enqueue_burst(g_tx_ring, (void **)mbufs, valid, NULL);
+                        if (enq < valid) {
+                            rte_pktmbuf_free_bulk(&mbufs[enq], valid - enq);
+                        }
+                    }
+                }
+                /* process any mbufs returned for freeing by workers */
+                struct rte_mbuf *free_bufs[1024];
+                uint16_t f = rte_ring_dequeue_burst(g_free_ring, (void **)free_bufs, 1024, NULL);
+                if (f > 0) rte_pktmbuf_free_bulk(free_bufs, f);
             }
-            rte_delay_us_sleep(1000);
+
+                /* (RX mode) rx_worker now frees its own mbufs; nothing to dequeue here */
+                /* only overwrite last char */
+                putchar('\b');
+                putchar(spinner[spinner_idx % (sizeof(spinner)-1)]);
+                fflush(stdout);
+                spinner_idx++;
         }
 
         /* wait for worker to finish if not already */
         rte_eal_wait_lcore(worker_lcore);
+        if (dbchecker_err_handler) dbchecker_err_handler();
+        /* drain any remaining rings so main frees all mbufs before printing stats */
+        struct rte_mbuf *free_bufs[1024];
+        uint16_t f;
+        while ((f = rte_ring_dequeue_burst(g_free_ring, (void **)free_bufs, 1024, NULL)) > 0) {
+            /* free in bulk for better performance */
+            rte_pktmbuf_free_bulk(free_bufs, f);
+        }
+        /* rx_worker performed counting and freeing itself; no remaining rx_ring drain needed */
 
         /* final summary print */
         struct perf_stats s = {0};
-        s.total_packets = (uint64_t)rte_atomic64_read(&g_total_packets);
-        s.total_bytes = (uint64_t)rte_atomic64_read(&g_total_bytes);
+        s.total_packets = (uint64_t)g_total_packets;
+        s.total_bytes = (uint64_t)g_total_bytes;
         s.start_tsc = g_start_tsc ? g_start_tsc : rte_rdtsc();
         s.end_tsc = g_end_tsc ? g_end_tsc : rte_rdtsc();
+        /* clear spinner char and print final stats */
+        printf("\r ");
+        printf("\n");
         print_stats(g_mode_tx ? "TX Throughput Statistics" : "RX Throughput Statistics", &s, g_mode_tx ? g_pkt_size : 0);
-    } else {
-        /* single-core: run in current thread (existing behaviour) */
-        if (g_mode_tx)
-            do_tx(mp);
-        else
-            do_rx();
     }
-
+    else printf("Not enough lcores for multi-core mode (need at least 2)\n");
+    
     rte_eth_dev_stop(g_port_id);
     rte_eth_dev_close(g_port_id);
     rte_eal_cleanup();
