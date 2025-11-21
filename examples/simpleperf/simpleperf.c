@@ -26,10 +26,9 @@ extern int dbchecker_err_handler(void) __attribute__((weak));
 
 #define NUM_MBUFS 16384
 #define MBUF_CACHE_SIZE 250
-#define DEFAULT_BURST_SIZE 128
+#define DEFAULT_BURST_SIZE 64
 #define DEFAULT_PKT_SIZE 64
 #define DEFAULT_SECONDS 3600
-#define RING_SIZE 2048
 
 static uint16_t g_port_id = 0;
 static uint16_t g_queue_id = 0;
@@ -53,9 +52,10 @@ static volatile uint64_t g_total_bytes = 0;
 static volatile uint64_t g_start_tsc = 0;
 static volatile uint64_t g_end_tsc = 0;
 static volatile int g_worker_done = 0;
-static struct rte_ring *g_tx_ring = NULL;
-static struct rte_ring *g_free_ring = NULL;
 static struct rte_mempool *g_mp = NULL; /* global mempool for main core */
+/* packet template prepared by main to minimize per-packet construction in tx_worker */
+static uint8_t *g_template = NULL;
+static uint32_t g_frame_len = 0;
 
 
 static void usage(const char *prg)
@@ -128,7 +128,7 @@ static int port_init(uint16_t port, struct rte_mempool *mp)
     ret = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
     if (ret < 0) return ret;
 
-    uint16_t nb_rxd = 1024, nb_txd = 1024;
+    uint16_t nb_rxd = 512, nb_txd = 512;
     ret = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rxd, &nb_txd);
     if (ret < 0) return ret;
 
@@ -152,9 +152,9 @@ static int port_init(uint16_t port, struct rte_mempool *mp)
 static int tx_worker(void *arg)
 {
     (void)arg;
-    struct rte_mbuf *bufs[1024];
-    uint32_t burst = g_burst > 1024 ? 1024 : g_burst;
-    uint32_t frame_len = g_pkt_size < 64 ? 64 : g_pkt_size;
+    struct rte_mbuf *bufs[512];
+    struct rte_mbuf *bad_bufs[512];
+    uint32_t burst = g_burst > 512 ? 512 : g_burst;
 
     uint64_t tsc_hz = rte_get_tsc_hz();
     uint64_t deadline = 0;
@@ -162,15 +162,37 @@ static int tx_worker(void *arg)
     uint64_t local_packets = 0;
     uint64_t local_bytes = 0;
 
+    /* tx_worker now performs mbuf alloc/fill/send/free locally to preserve
+     * single-threaded alloc/free ownership for mbufs. The main thread only
+     * prepares a template buffer (`g_template`) to minimize per-packet work.
+     */
     while (!g_stop) {
-        uint16_t nb = rte_ring_dequeue_burst(g_tx_ring, (void **)bufs, burst, NULL);
-        if (nb == 0) {
+        /* try to allocate a bulk of mbufs; on failure briefly sleep */
+        if (rte_pktmbuf_alloc_bulk(g_mp, bufs, burst) != 0) {
             continue;
         }
+
+        /* fill payload from template; track any failure to append */
+        uint32_t valid = 0;
+        uint32_t bad = 0;
+        for (uint32_t i = 0; i < burst; i++) {
+            struct rte_mbuf *m = bufs[i];
+            char *pkt = (char *)rte_pktmbuf_append(m, g_frame_len);
+            if (pkt == NULL) {
+                bad_bufs[bad++] = m;
+                continue;
+            }
+            /* copy prebuilt template (ethernet header + payload) */
+            rte_memcpy(pkt, g_template, g_frame_len);
+            bufs[valid++] = m;
+        }
+
+        if (valid == 0) continue;
+
+        /* send as many as possible; tx_burst may return partial sends */
         uint16_t sent = 0;
-        /* try to send all dequeued mbufs, allow partial successes */
-        while (sent < nb) {
-            uint16_t n = rte_eth_tx_burst(g_port_id, g_queue_id, &bufs[sent], nb - sent);
+        while (sent < (uint16_t)valid) {
+            uint16_t n = rte_eth_tx_burst(g_port_id, g_queue_id, &bufs[sent], (uint16_t)(valid - sent));
             if (n == 0) break;
             if (!started) {
                 uint64_t t = rte_rdtsc();
@@ -180,23 +202,17 @@ static int tx_worker(void *arg)
             }
             sent += n;
             local_packets += n;
-            local_bytes += (uint64_t)n * frame_len;
+            local_bytes += (uint64_t)n * g_frame_len;
         }
-        /* any unsent mbufs must be returned to main core for freeing */
-        if (sent < nb) {
-            uint16_t remaining = nb - sent;
-            /* try to enqueue unsent mbufs to free_ring; retry until enqueued */
-            uint16_t off = sent;
-            while (remaining > 0) {
-                uint16_t enq = rte_ring_enqueue_burst(g_free_ring, (void **)&bufs[off], remaining, NULL);
-                if (enq == 0) {
-                    rte_delay_us_sleep(1);
-                    continue;
-                }
-                off += enq;
-                remaining -= enq;
-            }
+
+
+        /* free any mbufs that failed to be appended */
+        if (bad > 0) rte_pktmbuf_free_bulk(bad_bufs, bad);
+        /* free any unsent mbufs locally (tx_worker owns alloc/free) */
+        if (sent < (uint16_t)valid) {
+            rte_pktmbuf_free_bulk(&bufs[sent], (uint16_t)(valid - sent));
         }
+
         if (started && rte_rdtsc() >= deadline)
             break;
     }
@@ -211,8 +227,8 @@ static int tx_worker(void *arg)
 static int rx_worker(void *arg)
 {
     (void)arg;
-    struct rte_mbuf *bufs[1024];
-    uint32_t burst = g_burst > 1024 ? 1024 : g_burst;
+    struct rte_mbuf *bufs[512];
+    uint32_t burst = g_burst > 512 ? 512 : g_burst;
     uint64_t tsc_hz = rte_get_tsc_hz();
     uint64_t deadline = 0;
     int started = 0;
@@ -276,13 +292,8 @@ int main(int argc, char **argv)
         MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
     if (mp == NULL) rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 
-    /* store global mempool and create rings for inter-lcore comms */
+    /* store global mempool; rings removed since tx_worker now allocs/frees mbufs */
     g_mp = mp;
-    g_tx_ring = rte_ring_create("tx_ring", RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
-    if (g_tx_ring == NULL) rte_exit(EXIT_FAILURE, "Failed to create tx_ring\n");
-    /* rx_ring removed: rx_worker now frees received mbufs locally */
-    g_free_ring = rte_ring_create("free_ring", RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
-    if (g_free_ring == NULL) rte_exit(EXIT_FAILURE, "Failed to create free_ring\n");
 
     if (port_init(g_port_id, mp) < 0) rte_exit(EXIT_FAILURE, "Cannot init port %u\n", g_port_id);
 
@@ -329,54 +340,29 @@ int main(int argc, char **argv)
             err = rte_eal_remote_launch(rx_worker, mp, worker_lcore);
         if (err) rte_exit(EXIT_FAILURE, "Failed to launch worker on lcore %u\n", worker_lcore);
 
-        struct rte_mbuf *mbufs[1024];
         struct rte_ether_addr src_mac;
-        if (g_mode_tx) rte_eth_macaddr_get(g_port_id, &src_mac);
+        if (g_mode_tx) {
+            rte_eth_macaddr_get(g_port_id, &src_mac);
+            /* prepare a template packet (ether header + zeroed payload) so
+             * tx_worker can quickly memcpy it into newly allocated mbufs.
+             */
+            g_frame_len = g_pkt_size < 64 ? 64 : g_pkt_size;
+            g_template = malloc(g_frame_len);
+            if (g_template == NULL) rte_exit(EXIT_FAILURE, "Failed to allocate template buffer\n");
+            if (!g_have_dst_mac) memset(&g_dst_mac, 0xFF, sizeof(g_dst_mac));
+            struct rte_ether_hdr *eth = (struct rte_ether_hdr *)g_template;
+            rte_ether_addr_copy(&g_dst_mac, &eth->dst_addr);
+            rte_ether_addr_copy(&src_mac, &eth->src_addr);
+            eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
+            if (g_frame_len > sizeof(struct rte_ether_hdr))
+                memset(g_template + sizeof(struct rte_ether_hdr), 0, g_frame_len - sizeof(struct rte_ether_hdr));
+        }
 
         /* Lightweight main loop: produce TX mbufs (if TX) and show a spinner
          * to indicate liveness. Avoid per-interval expensive computations and atomics.
          */
         while (!g_stop && g_worker_done == 0) {
-            /* TX producer: prepare packets and enqueue to tx_ring (no counting) */
-            if (g_mode_tx) {
-                uint32_t produce = g_burst > 1024 ? 1024 : g_burst;
-                if (rte_pktmbuf_alloc_bulk(g_mp, mbufs, produce) == 0) {
-                    uint32_t frame_len = g_pkt_size < 64 ? 64 : g_pkt_size;
-                    struct rte_mbuf *bad_bufs[1024];
-                    uint32_t bad = 0;
-                    for (uint32_t i = 0; i < produce; i++) {
-                        struct rte_mbuf *m = mbufs[i];
-                        char *pkt = (char *)rte_pktmbuf_append(m, frame_len);
-                        if (pkt == NULL) {
-                            bad_bufs[bad++] = m;
-                            mbufs[i] = NULL;
-                            continue;
-                        }
-                        struct rte_ether_hdr *eth = (struct rte_ether_hdr *)pkt;
-                        if (!g_have_dst_mac) memset(&g_dst_mac, 0xFF, sizeof(g_dst_mac));
-                        rte_ether_addr_copy(&g_dst_mac, &eth->dst_addr);
-                        rte_ether_addr_copy(&src_mac, &eth->src_addr);
-                        eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
-                    }
-                    /* compact valid pointers */
-                    uint32_t valid = 0;
-                    for (uint32_t i = 0; i < produce; i++) if (mbufs[i]) mbufs[valid++] = mbufs[i];
-                    /* free any bad mbufs in bulk */
-                    if (bad > 0) rte_pktmbuf_free_bulk(bad_bufs, bad);
-                    if (valid > 0) {
-                        uint16_t enq = rte_ring_enqueue_burst(g_tx_ring, (void **)mbufs, valid, NULL);
-                        if (enq < valid) {
-                            rte_pktmbuf_free_bulk(&mbufs[enq], valid - enq);
-                        }
-                    }
-                }
-                /* process any mbufs returned for freeing by workers */
-                struct rte_mbuf *free_bufs[1024];
-                uint16_t f = rte_ring_dequeue_burst(g_free_ring, (void **)free_bufs, 1024, NULL);
-                if (f > 0) rte_pktmbuf_free_bulk(free_bufs, f);
-            }
-
-                /* (RX mode) rx_worker now frees its own mbufs; nothing to dequeue here */
+                /* (RX mode) rx_worker frees its own mbufs; tx_worker now handles alloc/fill/send/free */
                 /* only overwrite last char */
                 putchar('\b');
                 putchar(spinner[spinner_idx % (sizeof(spinner)-1)]);
@@ -387,13 +373,7 @@ int main(int argc, char **argv)
         /* wait for worker to finish if not already */
         rte_eal_wait_lcore(worker_lcore);
         if (dbchecker_err_handler) dbchecker_err_handler();
-        /* drain any remaining rings so main frees all mbufs before printing stats */
-        struct rte_mbuf *free_bufs[1024];
-        uint16_t f;
-        while ((f = rte_ring_dequeue_burst(g_free_ring, (void **)free_bufs, 1024, NULL)) > 0) {
-            /* free in bulk for better performance */
-            rte_pktmbuf_free_bulk(free_bufs, f);
-        }
+        /* no ring draining needed: tx_worker frees unsent mbufs locally */
         /* rx_worker performed counting and freeing itself; no remaining rx_ring drain needed */
 
         /* final summary print */
@@ -406,6 +386,10 @@ int main(int argc, char **argv)
         printf("\r ");
         printf("\n");
         print_stats(g_mode_tx ? "TX Throughput Statistics" : "RX Throughput Statistics", &s, g_mode_tx ? g_pkt_size : 0);
+        if (g_template) {
+            free(g_template);
+            g_template = NULL;
+        }
     }
     else printf("Not enough lcores for multi-core mode (need at least 2)\n");
     

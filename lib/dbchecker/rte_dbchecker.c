@@ -152,6 +152,7 @@ int dbchecker_command(struct dbchecker_cmd *cmd){
     if (cmd_status == DBCHECKER_CMD_ERROR) {
         // pthread_mutex_unlock(&uio_mmio_lock);
         fprintf(stderr, "DBCHECKER: command error, cmd: 0x%llx\n", (unsigned long long)validated_cmd);
+        rte_dump_stack();
         return -1;
     }
     // DBCHECKER_DEBUG_LOG("DBCHECKER: command completed, op: 0x%x, imm: 0x%llx\n",
