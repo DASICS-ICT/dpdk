@@ -318,7 +318,7 @@ int main(int argc, char **argv)
             printf("Port %u: link not up after %u seconds, continuing anyway\n", g_port_id, wait_secs);
     }
 
-    printf("Starting %s test on port %u queue %u burst=%u size=%u s=%u... \n",
+    printf("Starting %s test on port %u queue %u burst=%u size=%u s=%u...  ",
         g_mode_tx ? "TX" : "RX", g_port_id, g_queue_id, g_burst, g_pkt_size, g_seconds);
 
     /* initialize shared counters (published by worker at end) */
@@ -327,43 +327,71 @@ int main(int argc, char **argv)
     g_worker_done = 0;
     g_start_tsc = 0;
     g_end_tsc = 0;
-    /* single-core mode: run worker loop directly on main core */
-    if (g_mode_tx) {
+    const char spinner[] = "|/-\\";
+    size_t spinner_idx = 0;
+    unsigned int lcore_count = rte_lcore_count();
+    if (lcore_count >= 2) {
+        /* multi-core: launch worker on a secondary lcore and use main core as printer */
+        unsigned int worker_lcore = rte_get_next_lcore(-1, 1, 0);
+        int err;
+        if (g_mode_tx)
+            err = rte_eal_remote_launch(tx_worker, mp, worker_lcore);
+        else
+            err = rte_eal_remote_launch(rx_worker, mp, worker_lcore);
+        if (err) rte_exit(EXIT_FAILURE, "Failed to launch worker on lcore %u\n", worker_lcore);
+
         struct rte_ether_addr src_mac;
-        rte_eth_macaddr_get(g_port_id, &src_mac);
-        /* prepare a template packet (ether header + zeroed payload) so
-         * tx_worker can quickly memcpy it into newly allocated mbufs.
+        if (g_mode_tx) {
+            rte_eth_macaddr_get(g_port_id, &src_mac);
+            /* prepare a template packet (ether header + zeroed payload) so
+             * tx_worker can quickly memcpy it into newly allocated mbufs.
+             */
+            g_frame_len = g_pkt_size < 64 ? 64 : g_pkt_size;
+            g_template = malloc(g_frame_len);
+            if (g_template == NULL) rte_exit(EXIT_FAILURE, "Failed to allocate template buffer\n");
+            if (!g_have_dst_mac) memset(&g_dst_mac, 0xFF, sizeof(g_dst_mac));
+            struct rte_ether_hdr *eth = (struct rte_ether_hdr *)g_template;
+            rte_ether_addr_copy(&g_dst_mac, &eth->dst_addr);
+            rte_ether_addr_copy(&src_mac, &eth->src_addr);
+            eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
+            if (g_frame_len > sizeof(struct rte_ether_hdr))
+                memset(g_template + sizeof(struct rte_ether_hdr), 0, g_frame_len - sizeof(struct rte_ether_hdr));
+        }
+
+        /* Lightweight main loop: produce TX mbufs (if TX) and show a spinner
+         * to indicate liveness. Avoid per-interval expensive computations and atomics.
          */
-        g_frame_len = g_pkt_size < 64 ? 64 : g_pkt_size;
-        g_template = malloc(g_frame_len);
-        if (g_template == NULL) rte_exit(EXIT_FAILURE, "Failed to allocate template buffer\n");
-        if (!g_have_dst_mac) memset(&g_dst_mac, 0xFF, sizeof(g_dst_mac));
-        struct rte_ether_hdr *eth = (struct rte_ether_hdr *)g_template;
-        rte_ether_addr_copy(&g_dst_mac, &eth->dst_addr);
-        rte_ether_addr_copy(&src_mac, &eth->src_addr);
-        eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
-        if (g_frame_len > sizeof(struct rte_ether_hdr))
-            memset(g_template + sizeof(struct rte_ether_hdr), 0, g_frame_len - sizeof(struct rte_ether_hdr));
+        while (!g_stop && g_worker_done == 0) {
+                /* (RX mode) rx_worker frees its own mbufs; tx_worker now handles alloc/fill/send/free */
+                /* only overwrite last char */
+                putchar('\b');
+                putchar(spinner[spinner_idx % (sizeof(spinner)-1)]);
+                fflush(stdout);
+                spinner_idx++;
+        }
 
-        /* call tx_worker directly on the main core */
-        tx_worker(NULL);
-    } else {
-        /* RX mode: perform rx_worker logic on main core */
-        rx_worker(NULL);
-    }
+        /* wait for worker to finish if not already */
+        rte_eal_wait_lcore(worker_lcore);
+        if (dbchecker_err_handler) dbchecker_err_handler();
+        /* no ring draining needed: tx_worker frees unsent mbufs locally */
+        /* rx_worker performed counting and freeing itself; no remaining rx_ring drain needed */
 
-    if (dbchecker_err_handler) dbchecker_err_handler();
-    /* final summary print */
-    struct perf_stats s = {0};
-    s.total_packets = (uint64_t)g_total_packets;
-    s.total_bytes = (uint64_t)g_total_bytes;
-    s.start_tsc = g_start_tsc ? g_start_tsc : rte_rdtsc();
-    s.end_tsc = g_end_tsc ? g_end_tsc : rte_rdtsc();
-    print_stats(g_mode_tx ? "TX Throughput Statistics" : "RX Throughput Statistics", &s, g_mode_tx ? g_pkt_size : 0);
-    if (g_template) {
-        free(g_template);
-        g_template = NULL;
+        /* final summary print */
+        struct perf_stats s = {0};
+        s.total_packets = (uint64_t)g_total_packets;
+        s.total_bytes = (uint64_t)g_total_bytes;
+        s.start_tsc = g_start_tsc ? g_start_tsc : rte_rdtsc();
+        s.end_tsc = g_end_tsc ? g_end_tsc : rte_rdtsc();
+        /* clear spinner char and print final stats */
+        printf("\r ");
+        printf("\n");
+        print_stats(g_mode_tx ? "TX Throughput Statistics" : "RX Throughput Statistics", &s, g_mode_tx ? g_pkt_size : 0);
+        if (g_template) {
+            free(g_template);
+            g_template = NULL;
+        }
     }
+    else printf("Not enough lcores for multi-core mode (need at least 2)\n");
     
     rte_eth_dev_stop(g_port_id);
     rte_eth_dev_close(g_port_id);
