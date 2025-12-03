@@ -527,3 +527,7 @@ if get_option('default_library') == 'both'
  "default_library" to either "static" or "shared" to select default linkage
  for apps and any examples.''')
 endif
+
+if get_option('enable_dbchecker')
+    dpdk_conf.set('RTE_ENABLE_DBCHECKER', 1)
+endif

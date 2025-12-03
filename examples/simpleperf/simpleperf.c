@@ -22,7 +22,9 @@
 #include <rte_atomic.h>
 #include <rte_ring.h>
 
-extern int dbchecker_err_handler(void) __attribute__((weak));
+#ifdef RTE_ENABLE_DBCHECKER
+    #include <rte_dbchecker.h>
+#endif
 
 #define NUM_MBUFS 16384
 #define MBUF_CACHE_SIZE 250
@@ -158,23 +160,24 @@ static int tx_worker(void *arg)
 
     uint64_t tsc_hz = rte_get_tsc_hz();
     uint64_t deadline = 0;
-    int started = 0;
     uint64_t local_packets = 0;
     uint64_t local_bytes = 0;
+    int rv = 0;
+    uint16_t i;
 
     /* tx_worker now performs mbuf alloc/fill/send/free locally to preserve
      * single-threaded alloc/free ownership for mbufs. The main thread only
      * prepares a template buffer (`g_template`) to minimize per-packet work.
      */
-    while (!g_stop) {
-        /* try to allocate a bulk of mbufs; on failure briefly sleep */
-        if (rte_pktmbuf_alloc_bulk(g_mp, bufs, burst) != 0) {
-            continue;
-        }
 
-        /* fill payload from template; track any failure to append */
-        uint32_t valid = 0;
-        uint32_t bad = 0;
+    do {
+        rv = rte_pktmbuf_alloc_bulk(g_mp, bufs, burst);
+    } while (rv != 0);
+
+    /* fill payload from template; track any failure to append */
+    uint32_t valid = 0;
+    uint32_t bad = 0;
+    do {
         for (uint32_t i = 0; i < burst; i++) {
             struct rte_mbuf *m = bufs[i];
             char *pkt = (char *)rte_pktmbuf_append(m, g_frame_len);
@@ -186,34 +189,35 @@ static int tx_worker(void *arg)
             rte_memcpy(pkt, g_template, g_frame_len);
             bufs[valid++] = m;
         }
+    } while (valid == 0);
+    /* free any mbufs that failed to be appended */
+    if (bad > 0) rte_pktmbuf_free_bulk(bad_bufs, bad);
 
-        if (valid == 0) continue;
-
+    uint64_t t = rte_rdtsc();
+    if (g_start_tsc == 0) g_start_tsc = t;
+    deadline = g_start_tsc + (uint64_t)g_seconds * tsc_hz;
+    while (!g_stop) {
         /* send as many as possible; tx_burst may return partial sends */
+        #ifdef RTE_ENABLE_DBCHECKER
+            for (i = 0; i < valid; i++) {
+                dbchecker_activate_mtdt_hook(bufs[i], DMA_TO_DEVICE);
+            }
+        #endif
         uint16_t sent = 0;
         while (sent < (uint16_t)valid) {
-            uint16_t n = rte_eth_tx_burst(g_port_id, g_queue_id, &bufs[sent], (uint16_t)(valid - sent));
+            uint16_t n = rte_eth_tx_burst(g_port_id, g_queue_id, &bufs[sent], valid - sent);
             if (n == 0) break;
-            if (!started) {
-                uint64_t t = rte_rdtsc();
-                started = 1;
-                if (g_start_tsc == 0) g_start_tsc = t;
-                deadline = g_start_tsc + (uint64_t)g_seconds * tsc_hz;
-            }
             sent += n;
             local_packets += n;
             local_bytes += (uint64_t)n * g_frame_len;
         }
+        #ifdef RTE_ENABLE_DBCHECKER
+            for (i = 0; i < valid; i++) {
+                dbchecker_deactivate_mtdt_hook(bufs[i]);
+            }
+        #endif
 
-
-        /* free any mbufs that failed to be appended */
-        if (bad > 0) rte_pktmbuf_free_bulk(bad_bufs, bad);
-        /* free any unsent mbufs locally (tx_worker owns alloc/free) */
-        if (sent < (uint16_t)valid) {
-            rte_pktmbuf_free_bulk(&bufs[sent], (uint16_t)(valid - sent));
-        }
-
-        if (started && rte_rdtsc() >= deadline)
+        if (rte_rdtsc() >= deadline)
             break;
     }
     g_end_tsc = rte_rdtsc();
@@ -231,31 +235,36 @@ static int rx_worker(void *arg)
     uint32_t burst = g_burst > 512 ? 512 : g_burst;
     uint64_t tsc_hz = rte_get_tsc_hz();
     uint64_t deadline = 0;
-    int started = 0;
     uint64_t local_packets = 0;
     uint64_t local_bytes = 0;
+    uint16_t i;
+
+    uint64_t t = rte_rdtsc();
+    if (g_start_tsc == 0) g_start_tsc = t;
+    deadline = g_start_tsc + (uint64_t)g_seconds * tsc_hz;
 
     while (!g_stop) {
         uint16_t nb = rte_eth_rx_burst(g_port_id, g_queue_id, bufs, burst);
         if (nb == 0) {
             continue;
         }
-        if (!started) {
-            uint64_t t = rte_rdtsc();
-            started = 1;
-            if (g_start_tsc == 0) g_start_tsc = t;
-            deadline = g_start_tsc + (uint64_t)g_seconds * tsc_hz;
-        }
+
         /* count and free received mbufs locally to ensure RX-side alloc/free on same thread */
         uint64_t totlen = 0;
-        for (uint16_t i = 0; i < nb; i++) totlen += rte_pktmbuf_pkt_len(bufs[i]);
+        for (i = 0; i < nb; i++) totlen += rte_pktmbuf_pkt_len(bufs[i]);
         local_packets += nb;
         local_bytes += totlen;
         /* free received mbufs in bulk */
         rte_pktmbuf_free_bulk(bufs, nb);
-        if (started && rte_rdtsc() >= deadline)
+        #ifdef RTE_ENABLE_DBCHECKER
+            for (i = 0; i < nb; i++) {
+                dbchecker_deactivate_mtdt_hook(bufs[i]);
+            }
+        #endif
+        if (rte_rdtsc() >= deadline)
             break;
     }
+
     g_end_tsc = rte_rdtsc();
     /* publish RX counters to globals (no atomics) */
     g_total_packets = local_packets;
@@ -352,7 +361,9 @@ int main(int argc, char **argv)
         rx_worker(NULL);
     }
 
-    if (dbchecker_err_handler) dbchecker_err_handler();
+#ifdef RTE_ENABLE_DBCHECKER
+    dbchecker_err_handler();
+#endif
     /* final summary print */
     struct perf_stats s = {0};
     s.total_packets = (uint64_t)g_total_packets;

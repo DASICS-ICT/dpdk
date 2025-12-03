@@ -62,6 +62,15 @@
 #define IGB_TX_OFFLOAD_NOTSUP_MASK \
 		(RTE_MBUF_F_TX_OFFLOAD_MASK ^ IGB_TX_OFFLOAD_MASK)
 
+typedef uint64_t dma_addr_t;
+enum dma_data_direction {
+    DMA_BIDIRECTIONAL = 0,
+    DMA_FROM_DEVICE = 1,
+    DMA_TO_DEVICE = 2
+};
+
+extern int dbchecker_activate_mtdt_hook(dma_addr_t addr, enum dma_data_direction dir) __attribute__((weak));
+
 /**
  * Structure associated with each descriptor of the RX ring of a RX queue.
  */
@@ -922,6 +931,7 @@ eth_igb_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 
 		rxm = rxe->mbuf;
 		rxe->mbuf = nmb;
+		if (dbchecker_activate_mtdt_hook) dbchecker_activate_mtdt_hook(nmb, DMA_FROM_DEVICE);
 		dma_addr =
 			rte_cpu_to_le_64(rte_mbuf_data_iova_default(nmb));
 		rxdp->read.hdr_addr = 0;
@@ -2275,6 +2285,7 @@ igb_alloc_rx_queue_mbufs(struct igb_rx_queue *rxq)
 		rxd->read.hdr_addr = 0;
 		rxd->read.pkt_addr = dma_addr;
 		rxe[i].mbuf = mbuf;
+		if (dbchecker_activate_mtdt_hook) dbchecker_activate_mtdt_hook(mbuf, DMA_FROM_DEVICE);
 	}
 
 	return 0;
