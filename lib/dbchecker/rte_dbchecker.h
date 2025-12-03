@@ -17,34 +17,23 @@ enum dma_data_direction {
 };
 
 #define DBCHECKER_BASE_ADDR 0x40000000ULL
-#define DBCHECKER_REG_SIZE 8 /* 64bit */
+#define DBCHECKER_REG_SIZE 4 /* 32bit */
 #define DBCHECKER_REG_NUM 10 /* 10 registers */
 
-#define DBCHECKER_EN_OFFSET         0x00U
-#define DBCHECKER_CMD_OFFSET        0x08U
-#define DBCHECKER_MTDT_LO_OFFSET    0x10U
-#define DBCHECKER_MTDT_HI_OFFSET    0x18U
-#define DBCHECKER_RES_OFFSET        0x20U
-#define DBCHECKER_KEYL_OFFSET       0x28U
-#define DBCHECKER_KEYH_OFFSET       0x30U
-#define DBCHECKER_ERR_CNT_OFFSET    0x38U
-#define DBCHECKER_ERR_INFO_OFFSET   0x40U
-#define DBCHECKER_ERR_MTDT_OFFSET   0x48U
+#define DBCHECKER_EN_OFFSET          0x00U
+#define DBCHECKER_CMD_OFFSET         0x04U
+#define DBCHECKER_DBTE_MB_LO_OFFSET  0x08U
+#define DBCHECKER_DBTE_MB_HI_OFFSET  0x0CU
+#define DBCHECKER_ERR_ADDR_LO_OFFSET 0x10U
+#define DBCHECKER_ERR_ADDR_HI_OFFSET 0x14U
+#define DBCHECKER_ERR_INFO_OFFSET    0x18U
+#define DBCHECKER_ERR_CNT_OFFSET     0x1CU
 
-#define MAX_DBTE_TABLE_SIZE 4096
+#define MAX_DBTE_TABLE_SIZE 65535
 
 enum dbchecker_cmd_op {
   DBCHECKER_OP_FREE,
-  DBCHECKER_OP_ALLOC,
   DBCHECKER_OP_CLEAR,
-  DBCHECKER_OP_SWITCH
-};
-
-enum dbchecker_cmd_status {
-    DBCHECKER_CMD_INVALID,
-    DBCHECKER_CMD_REQUEST,
-    DBCHECKER_CMD_DONE,
-    DBCHECKER_CMD_ERROR
 };
 
 enum dbchecker_rw_mode {
@@ -55,31 +44,40 @@ enum dbchecker_rw_mode {
 };
 
 struct dbchecker_mtdt {
-  uint8_t  wr     : 2; /* 0: INVALID, 1: RO, 2: WO, 3: RW */
-  uint8_t  dev    : 5; /* device id */
-  uint32_t id     : 25;
-  uint64_t up_bnd : 48;
-  uint64_t lo_bnd : 48;
-};
+    // --- 第一个 64位 字 (Word 0) ---
+    // 0-31 位
+    uint64_t index_off : 4;
+    uint64_t researved : 20;
+    uint64_t valid     : 1;
+    uint64_t wr        : 2;
+    uint64_t dev_id    : 5;
+    
+    // 32-63 位 (up_bnd 的低 32 位)
+    uint64_t up_bnd_low : 32; 
+
+    // --- 第二个 64位 字 (Word 1) ---
+    // 64-79 位 (up_bnd 的高 16 位)
+    uint64_t up_bnd_high : 16;
+    
+    // 80-127 位 (lo_bnd 正好 48 位)
+    uint64_t lo_bnd      : 48;
+} __attribute__((packed));
 
 struct dbchecker_cmd {
-  uint8_t  status : 2; /* 00: inv, 01: req, 10: done, 11: err */
-  uint8_t  op     : 2; /* 00: free, 01: alloc, 10: clear, 11: switch */
-  uint8_t  pad    : 8;
-  uint64_t imm    : 52;
-  struct dbchecker_mtdt mtdt; /* only used for alloc cmd and switch cmd */
-};
+  uint32_t v        : 1;  /* valid bit */
+  uint32_t op       : 1;  /* 0: free, 1: clear_cnt */
+  uint32_t reserved : 13;
+  uint32_t clr      : 1;  /* 0: clear the specific mtdt; 1: clear all */
+  uint32_t index    : 16; /* index of the mtdt to be cleaned */
+} __attribute__((packed));
 
-struct dbchecker_en_ctrl {
-  uint16_t byp_dev_bm : 16;
-  uint64_t padding    : 42;
-  bool func_en;
-  bool intr_en;
-  bool intr_clr;
-  bool stall_mode;
-  bool err_byp;
-  bool err_rpt;
-};
+#define DBCHECKER_ENABLE_MASK 0x80000000UL /* bypass device 31 by default */
+#define DBCHECKER_DISABLE_MASK 0x0UL
+#define UNTRUST_DEV_ID 0x0U
+
+static uint16_t dbte_alloc_id = 0;
+
+static uint8_t dbchecker_enable = 0;
 
 #define DBCHECKER_DEBUG 0
 
@@ -93,10 +91,15 @@ struct dbchecker_en_ctrl {
 int dbchecker_init(const char *dev);
 void dbchecker_exit(void);
 int dbchecker_command(struct dbchecker_cmd *cmd);
-void dbchecker_en_set(struct dbchecker_en_ctrl *ctrl);
+void dbchecker_en_set(uint32_t dev_mask);
 uint32_t dbchecker_en_get(void);
 dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir);
 dma_addr_t dbchecker_free_mtdt(dma_addr_t addr);
+int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir);
+int dbchecker_deactivate_mtdt(dma_addr_t addr);
+void dbchecker_free_all_mtdt(void);
+int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir);
+int dbchecker_deactivate_mtdt_hook(struct rte_mbuf *m);
 int dbchecker_err_handler(void);
 int dbchecker_module_init_hook(void);
 void dbchecker_module_exit_hook(void);
