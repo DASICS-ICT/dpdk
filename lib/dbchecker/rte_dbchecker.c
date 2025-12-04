@@ -38,7 +38,7 @@ static size_t uio_map_size = 0;
 // static pthread_mutex_t uio_mmio_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* store allocated metadata copies to avoid referencing stack addresses */
-static struct dbchecker_mtdt *dbte_table[MAX_DBTE_TABLE_SIZE];
+static struct dbchecker_mtdt *dbte_table;
 
 /* helpers: pread/pwrite wrappers */
 /*
@@ -130,8 +130,9 @@ int dbchecker_command(struct dbchecker_cmd *cmd){
                              ((cmd->clr & 0x1UL) << 16) |
                              (cmd->index & 0xFFFFUL);
     // DBCHECKER_DEBUG_LOG("DBCHECKER: validated cmd: 0x%llx\n", (unsigned long long)validated_cmd);
+    //printf("validated cmd = %x\n", validated_cmd);
     uio_write32(DBCHECKER_CMD_OFFSET, validated_cmd);
-
+    //printf("submit cmd\n");
     // DBCHECKER_DEBUG_LOG("DBCHECKER: command completed, op: 0x%x, imm: 0x%llx\n",
         // cmd->op, (unsigned long long)cmd->imm);
     // pthread_mutex_unlock(&uio_mmio_lock);
@@ -166,8 +167,8 @@ dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_dire
     dbchecker_set_up_bnd(&mtdt, (addr + size) & 0xFFFFFFFFFFFFULL);
     mtdt.dev_id = UNTRUST_DEV_ID;
     
-    if (dbte_table[dbte_alloc_id]) {
-        printf("DBCHECKER: warning, mtdt exists at idx %u\n", dbte_alloc_id);
+    if (dbte_table[dbte_alloc_id].valid) {
+        printf("DBCHECKER: error, mtdt exists at idx %u\n", dbte_alloc_id);
         return alloc_addr; // fail to alloc
         
     }
@@ -180,9 +181,7 @@ dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_dire
     // DBCHECKER_DEBUG_LOG("DBCHECKER: construct alloc_addr: 0x%llx | 0x%llx\n",
         // (unsigned long long)(addr & 0xFFFFFFFFFFFFULL), (unsigned long long)((uint64_t)(cmd_res & 0xFFF00000) << 32));
     // store copy of mtdt
-    struct dbchecker_mtdt *copy = malloc(sizeof(*copy));
-    if (copy) *copy = mtdt;
-    dbte_table[dbte_alloc_id] = copy;
+    dbte_table[dbte_alloc_id] = mtdt;
     dbte_alloc_id = (dbte_alloc_id + 1) % MAX_DBTE_TABLE_SIZE;
     // DBCHECKER_DEBUG_LOG("DBCHECKER: alloc addr: 0x%llx, save metadata idx %zu\n",
     //     (unsigned long long)alloc_addr, idx);
@@ -199,10 +198,8 @@ dma_addr_t dbchecker_free_mtdt(dma_addr_t addr){
         return addr; // dbchecker not enabled
 
     uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
-    if (dbte_table[index]) {
-        free(dbte_table[index]);
-        dbte_table[index] = NULL;
-    }
+
+    dbte_table[index].valid = 0;
 
     struct dbchecker_cmd free_cmd;
     memset(&free_cmd, 0, sizeof(free_cmd));
@@ -216,13 +213,9 @@ dma_addr_t dbchecker_free_mtdt(dma_addr_t addr){
 }
 
 void dbchecker_free_all_mtdt(void){
-    int i = 0;
-    for (i = 0; i < MAX_DBTE_TABLE_SIZE; i++) {
-        if (dbte_table[i]) {
-            free(dbte_table[i]);
-            dbte_table[i] = NULL;
-        }
-    }
+    if (dbte_table)
+        rte_free(dbte_table);
+
     struct dbchecker_cmd free_cmd;
     memset(&free_cmd, 0, sizeof(free_cmd));
     free_cmd.op = DBCHECKER_OP_FREE;
@@ -254,16 +247,13 @@ int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir){
         return 0; // dbchecker not enabled
 
     uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
-    struct dbchecker_mtdt *mtdt = dbte_table[index];
-    if (!mtdt) {
-        fprintf(stderr, "DBCHECKER: activate failed, no mtdt at index %u\n", index);
-        return -1;
-    }
-    mtdt->wr = (dir == DMA_BIDIRECTIONAL) ? DBCHECKER_RWMODE_RW :
-               (dir == DMA_FROM_DEVICE) ? DBCHECKER_RWMODE_WO :
-               (dir == DMA_TO_DEVICE) ? DBCHECKER_RWMODE_RO :
-                DBCHECKER_RWMODE_INVALID;
-    mtdt->valid = 1;
+    struct dbchecker_mtdt mtdt = dbte_table[index];
+    mtdt.valid = 1;
+    mtdt.wr = (dir == DMA_BIDIRECTIONAL) ? DBCHECKER_RWMODE_RW :
+              (dir == DMA_FROM_DEVICE) ? DBCHECKER_RWMODE_WO :
+              (dir == DMA_TO_DEVICE) ? DBCHECKER_RWMODE_RO :
+               DBCHECKER_RWMODE_INVALID;
+    mtdt.valid = 1;
     return 0;
 }
 
@@ -281,14 +271,13 @@ int dbchecker_deactivate_mtdt(dma_addr_t addr){
         return 0; // dbchecker not enabled
 
     uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
-    if (dbte_table[index]) {
-        dbte_table[index]->valid = 0;
-    }
+    dbte_table[index].valid = 0;
     struct dbchecker_cmd free_cmd;
     memset(&free_cmd, 0, sizeof(free_cmd));
     free_cmd.op = DBCHECKER_OP_FREE;
     free_cmd.clr = 0;
     free_cmd.index = index;
+    //printf("deactivate index %x\n", index);
     return dbchecker_command(&free_cmd);
 }
 
@@ -363,7 +352,17 @@ int dbchecker_init(const char *dev)
         return -1;
     }
 
-    memset(dbte_table, 0, sizeof(dbte_table));
+    dbte_table = (struct dbchecker_mtdt*)rte_zmalloc("dbte_table", 
+        sizeof(struct dbchecker_mtdt) * MAX_DBTE_TABLE_SIZE,
+        RTE_CACHE_LINE_SIZE
+    );
+    DBCHECKER_DEBUG_LOG("1\n");
+    if (!dbte_table){
+        printf("DBChecker: alloc dbte table failed\n");
+        return -1;
+    }
+    DBCHECKER_DEBUG_LOG("2\n");
+    uint64_t dbte_table_phys = rte_mem_virt2iova((const void *)dbte_table);
 
     // err_thread_running = true;
     // if (pthread_create(&err_thread, NULL, err_thread_fn, NULL) != 0) {
@@ -373,7 +372,9 @@ int dbchecker_init(const char *dev)
     //     err_thread_running = false;
     //     return -1;
     // }
-
+    DBCHECKER_DEBUG_LOG("DBChecker: dbte_table_phys = %llx\n", dbte_table_phys);
+    uio_write32(DBCHECKER_DBTE_MB_LO_OFFSET, (uint32_t)(dbte_table_phys & 0xFFFFFFFFUL));
+    uio_write32(DBCHECKER_DBTE_MB_HI_OFFSET, (uint32_t)(dbte_table_phys >> 32));
     dbchecker_en_set(DBCHECKER_ENABLE_MASK);
     dbchecker_enable = 1;
     printf("DBCHECKER (userspace): init, using %s\n", uio_device);

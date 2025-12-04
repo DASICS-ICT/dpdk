@@ -75,7 +75,8 @@ struct dbchecker_cmd {
 #define DBCHECKER_DISABLE_MASK 0x0UL
 #define UNTRUST_DEV_ID 0x0U
 
-static uint16_t dbte_alloc_id = 0;
+// you do not know whether the ptr is signed if count dbte_index from 0
+static uint16_t dbte_alloc_id = 1;
 
 static uint8_t dbchecker_enable = 0;
 
