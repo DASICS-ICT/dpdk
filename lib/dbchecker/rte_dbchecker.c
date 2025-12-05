@@ -131,6 +131,12 @@ int dbchecker_command(struct dbchecker_cmd *cmd){
                              (cmd->index & 0xFFFFUL);
     // DBCHECKER_DEBUG_LOG("DBCHECKER: validated cmd: 0x%llx\n", (unsigned long long)validated_cmd);
     //printf("validated cmd = %x\n", validated_cmd);
+    // uint32_t cmd_reg;
+    // do {
+    //     cmd_reg = uio_read32(DBCHECKER_CMD_OFFSET);
+    //     printf("cmd_reg = %x\n", cmd_reg);
+    // } while(cmd_reg & 0x80000000);
+    
     uio_write32(DBCHECKER_CMD_OFFSET, validated_cmd);
     //printf("submit cmd\n");
     // DBCHECKER_DEBUG_LOG("DBCHECKER: command completed, op: 0x%x, imm: 0x%llx\n",
@@ -173,7 +179,7 @@ dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_dire
         
     }
     mtdt.index_off = (dbte_alloc_id & 0xFUL);
-    mtdt.valid = 1;
+    mtdt.valid = 0;
 
     // DBCHECKER_DEBUG_LOG("DBCHECKER: request alloc mtdt, lo: 0x%llx, up: 0x%llx\n",
     // (unsigned long long)mtdt.lo_bnd, (unsigned long long)mtdt.up_bnd);
@@ -198,6 +204,13 @@ dma_addr_t dbchecker_free_mtdt(dma_addr_t addr){
         return addr; // dbchecker not enabled
 
     uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
+    //printf("dbchecker_free_mtdt\n");
+
+    if (index >= MAX_DBTE_TABLE_SIZE) {
+        printf("DBCHECKER Error: free mtdt failed, index %u out of bounds (Max %u)\n", 
+           index, MAX_DBTE_TABLE_SIZE);
+        return (dma_addr_t)-1; 
+    }
 
     dbte_table[index].valid = 0;
 
@@ -213,14 +226,22 @@ dma_addr_t dbchecker_free_mtdt(dma_addr_t addr){
 }
 
 void dbchecker_free_all_mtdt(void){
-    if (dbte_table)
-        rte_free(dbte_table);
+    //printf("dbchecker_free_all_mtdt\n");
 
+    // there is a bug here
+    // rte_free will trig a seg fault and i have no idea why
+    if (dbte_table) {
+        rte_free(dbte_table);
+        dbte_table = NULL;
+    }
+    
+    //printf("free dbte table\n");
     struct dbchecker_cmd free_cmd;
     memset(&free_cmd, 0, sizeof(free_cmd));
     free_cmd.op = DBCHECKER_OP_FREE;
     free_cmd.clr = 1; // clear all
     dbchecker_command(&free_cmd);
+    //printf("submit clear all cmd\n");
 }
 
 
@@ -248,7 +269,6 @@ int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir){
 
     uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
     struct dbchecker_mtdt mtdt = dbte_table[index];
-    mtdt.valid = 1;
     mtdt.wr = (dir == DMA_BIDIRECTIONAL) ? DBCHECKER_RWMODE_RW :
               (dir == DMA_FROM_DEVICE) ? DBCHECKER_RWMODE_WO :
               (dir == DMA_TO_DEVICE) ? DBCHECKER_RWMODE_RO :
@@ -384,21 +404,19 @@ int dbchecker_init(const char *dev)
 /* Cleanup user-space DBChecker */
 void dbchecker_exit(void)
 {
-    dbchecker_en_set(DBCHECKER_DISABLE_MASK);
-    dbchecker_enable = 0;
-
     // if (err_thread_running) {
     //     err_thread_running = false;
     //     pthread_join(err_thread, NULL);
     // }
-
+    dbchecker_free_all_mtdt();
+    dbchecker_en_set(DBCHECKER_DISABLE_MASK);
     if (uio_map) {
         munmap(uio_map, uio_map_size);
         uio_map = NULL;
         uio_map_size = 0;
     }
     if (uio_fd >= 0) close(uio_fd);
-    dbchecker_free_all_mtdt();
+    dbchecker_enable = 0;
     printf("DBCHECKER (userspace): exit\n");
 }
 
@@ -480,6 +498,7 @@ void dbchecker_dma_zone_alloc_hook(const struct rte_memzone *mz)
          * update the internal memzone descriptor. */
         struct rte_memzone *mz_nc = (struct rte_memzone *)mz;
         mz_nc->iova = (rte_iova_t)new_iova;
+        dbchecker_activate_mtdt(new_iova, DMA_BIDIRECTIONAL);
         DBCHECKER_DEBUG_LOG("dbchecker_dma_zone_alloc_hook: updated memzone '%s' iova 0x%llx -> 0x%llx\n",
             mz->name, (unsigned long long)base, (unsigned long long)new_iova);
     }
