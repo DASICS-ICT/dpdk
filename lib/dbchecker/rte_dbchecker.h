@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <rte_mbuf.h>
 #include <rte_memzone.h>
+#include <rte_malloc.h>
 
 /* Minimal local replacements for kernel types used by original API */
 typedef uint64_t dma_addr_t;
@@ -43,42 +44,27 @@ enum dbchecker_rw_mode {
     DBCHECKER_RWMODE_RW
 };
 
+// we assume that we use little-endian system
 struct dbchecker_mtdt {
-    // --- 第一个 64位 字 (Word 0) ---
-    // 0-31 位
-    uint64_t index_off : 4;
-    uint64_t researved : 20;
-    uint64_t valid     : 1;
-    uint64_t wr        : 2;
+    uint64_t lo_bnd    : 48;
+    uint64_t up_bnd_lo : 16;
+    uint64_t up_bnd_hi : 32;
     uint64_t dev_id    : 5;
-    
-    // 32-63 位 (up_bnd 的低 32 位)
-    uint64_t up_bnd_low : 32; 
-
-    // --- 第二个 64位 字 (Word 1) ---
-    // 64-79 位 (up_bnd 的高 16 位)
-    uint64_t up_bnd_high : 16;
-    
-    // 80-127 位 (lo_bnd 正好 48 位)
-    uint64_t lo_bnd      : 48;
-} __attribute__((packed));
+    uint64_t wr        : 2;
+    uint64_t v         : 1;
+    uint64_t reserved  : 20;
+    uint64_t index_off : 4;
+}__attribute__((packed));
 
 struct dbchecker_cmd {
-  uint32_t v        : 1;  /* valid bit */
-  uint32_t op       : 1;  /* 0: free, 1: clear_cnt */
-  uint32_t reserved : 13;
-  uint32_t clr      : 1;  /* 0: clear the specific mtdt; 1: clear all */
-  uint32_t index    : 16; /* index of the mtdt to be cleaned */
-} __attribute__((packed));
+  uint32_t imm    : 30; /* index of the mtdt to be cleaned */
+  uint32_t op     : 1;
+  uint32_t v      : 1;
+}__attribute__((packed));
 
 #define DBCHECKER_ENABLE_MASK 0x80000000UL /* bypass device 31 by default */
 #define DBCHECKER_DISABLE_MASK 0x0UL
 #define UNTRUST_DEV_ID 0x0U
-
-// you do not know whether the ptr is signed if count dbte_index from 0
-static uint16_t dbte_alloc_id = 1;
-
-static uint8_t dbchecker_enable = 0;
 
 #define DBCHECKER_DEBUG 0
 

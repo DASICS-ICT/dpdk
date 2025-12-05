@@ -69,7 +69,7 @@ enum dma_data_direction {
     DMA_TO_DEVICE = 2
 };
 
-extern int dbchecker_activate_mtdt_hook(dma_addr_t addr, enum dma_data_direction dir) __attribute__((weak));
+extern int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir) __attribute__((weak));
 
 /**
  * Structure associated with each descriptor of the RX ring of a RX queue.
