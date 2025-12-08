@@ -200,7 +200,7 @@ static int tx_worker(void *arg)
         /* send as many as possible; tx_burst may return partial sends */
         #ifdef RTE_ENABLE_DBCHECKER
             for (i = 0; i < valid; i++) {
-                dbchecker_activate_mtdt_hook(bufs[i], DMA_TO_DEVICE);
+                dbchecker_alloc_mtdt_hook(bufs[i], DMA_TO_DEVICE);
             }
         #endif
         uint16_t sent = 0;
@@ -212,8 +212,14 @@ static int tx_worker(void *arg)
             local_bytes += (uint64_t)n * g_frame_len;
         }
         #ifdef RTE_ENABLE_DBCHECKER
+            // i = dbchecker_err_handler();
+            // if (i != 0) {
+            //     rte_exit(EXIT_FAILURE, "DBChecker detected errors, exiting\n");
+            // }
+
             for (i = 0; i < valid; i++) {
-                dbchecker_deactivate_mtdt_hook(bufs[i]);
+                dbchecker_free_mtdt_hook(bufs[i]);
+                //dbchecker_free_all_mtdt();
             }
         #endif
 
@@ -258,7 +264,7 @@ static int rx_worker(void *arg)
         rte_pktmbuf_free_bulk(bufs, nb);
         #ifdef RTE_ENABLE_DBCHECKER
             for (i = 0; i < nb; i++) {
-                dbchecker_deactivate_mtdt_hook(bufs[i]);
+                dbchecker_free_mtdt_hook(bufs[i]);
             }
         #endif
         if (rte_rdtsc() >= deadline)

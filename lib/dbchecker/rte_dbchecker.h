@@ -17,24 +17,28 @@ enum dma_data_direction {
     DMA_TO_DEVICE = 2
 };
 
+static rte_spinlock_t my_lock;
+
 #define DBCHECKER_BASE_ADDR 0x40000000ULL
 #define DBCHECKER_REG_SIZE 4 /* 32bit */
 #define DBCHECKER_REG_NUM 10 /* 10 registers */
 
 #define DBCHECKER_EN_OFFSET          0x00U
-#define DBCHECKER_CMD_OFFSET         0x04U
-#define DBCHECKER_DBTE_MB_LO_OFFSET  0x08U
-#define DBCHECKER_DBTE_MB_HI_OFFSET  0x0CU
-#define DBCHECKER_ERR_ADDR_LO_OFFSET 0x10U
-#define DBCHECKER_ERR_ADDR_HI_OFFSET 0x14U
-#define DBCHECKER_ERR_INFO_OFFSET    0x18U
-#define DBCHECKER_ERR_CNT_OFFSET     0x1CU
+#define DBCHECKER_MTDT_0_OFFSET      0x04U
+#define DBCHECKER_MTDT_1_OFFSET      0x08U
+#define DBCHECKER_MTDT_2_OFFSET      0x0CU
+#define DBCHECKER_CMD_OFFSET         0x10U
+#define DBCHECKER_ERR_ADDR_LO_OFFSET 0x14U
+#define DBCHECKER_ERR_ADDR_HI_OFFSET 0x18U
+#define DBCHECKER_ERR_INFO_OFFSET    0x1CU
+#define DBCHECKER_ERR_CNT_OFFSET     0x20U
 
-#define MAX_DBTE_TABLE_SIZE 65535
+#define MAX_DBTE_TABLE_SIZE 4096
 
 enum dbchecker_cmd_op {
   DBCHECKER_OP_FREE,
   DBCHECKER_OP_CLEAR,
+  DBCHECKER_OP_ALLOC,
 };
 
 enum dbchecker_rw_mode {
@@ -48,21 +52,22 @@ enum dbchecker_rw_mode {
 struct dbchecker_mtdt {
     uint64_t lo_bnd    : 48;
     uint64_t up_bnd_lo : 16;
-    uint64_t up_bnd_hi : 32;
-    uint64_t dev_id    : 5;
-    uint64_t wr        : 2;
-    uint64_t v         : 1;
-    uint64_t reserved  : 20;
-    uint64_t index_off : 4;
-}__attribute__((packed));
+    uint32_t up_bnd_hi : 32;
+    uint32_t imm   : 28;
+    uint32_t status: 1;
+    uint32_t op    : 2;
+    uint32_t v     : 1;
+};
 
 struct dbchecker_cmd {
-  uint32_t imm    : 30; /* index of the mtdt to be cleaned */
-  uint32_t op     : 1;
+  uint32_t imm    : 28; /* index of the mtdt to be cleaned */
+  uint32_t status : 1;
+  uint32_t op     : 2;
   uint32_t v      : 1;
-}__attribute__((packed));
+  struct dbchecker_mtdt* mtdt;
+};
 
-#define DBCHECKER_ENABLE_MASK 0x80000000UL /* bypass device 31 by default */
+#define DBCHECKER_ENABLE_MASK 0x1UL /* bypass device 31 by default */
 #define DBCHECKER_DISABLE_MASK 0x0UL
 #define UNTRUST_DEV_ID 0x0U
 
@@ -90,7 +95,7 @@ int dbchecker_deactivate_mtdt_hook(struct rte_mbuf *m);
 int dbchecker_err_handler(void);
 int dbchecker_module_init_hook(void);
 void dbchecker_module_exit_hook(void);
-void dbchecker_alloc_mtdt_hook(struct rte_mbuf *m);
+void dbchecker_alloc_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir);
 void dbchecker_free_mtdt_hook(struct rte_mbuf *m);
 void dbchecker_dma_zone_alloc_hook(const struct rte_memzone *mz);
 void dbchecker_dma_zone_free_hook(const struct rte_memzone *mz);

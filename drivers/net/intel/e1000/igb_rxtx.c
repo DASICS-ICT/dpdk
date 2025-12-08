@@ -69,7 +69,8 @@ enum dma_data_direction {
     DMA_TO_DEVICE = 2
 };
 
-extern int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir) __attribute__((weak));
+extern int dbchecker_alloc_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir) __attribute__((weak));
+extern int dbchecker_free_mtdt_hook(struct rte_mbuf *m) __attribute__((weak));
 
 /**
  * Structure associated with each descriptor of the RX ring of a RX queue.
@@ -568,6 +569,7 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 				RTE_MBUF_PREFETCH_TO_FREE(txn->mbuf);
 
 				if (txe->mbuf != NULL) {
+					// if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(txe->mbuf);
 					rte_pktmbuf_free_seg(txe->mbuf);
 					txe->mbuf = NULL;
 				}
@@ -596,8 +598,10 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 			txn = &sw_ring[txe->next_id];
 			txd = &txr[tx_id];
 
-			if (txe->mbuf != NULL)
+			if (txe->mbuf != NULL) {
+				// if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(txe->mbuf);
 				rte_pktmbuf_free_seg(txe->mbuf);
+			}
 			txe->mbuf = m_seg;
 
 			/*
@@ -931,7 +935,7 @@ eth_igb_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 
 		rxm = rxe->mbuf;
 		rxe->mbuf = nmb;
-		if (dbchecker_activate_mtdt_hook) dbchecker_activate_mtdt_hook(nmb, DMA_FROM_DEVICE);
+		if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(nmb, DMA_FROM_DEVICE);
 		dma_addr =
 			rte_cpu_to_le_64(rte_mbuf_data_iova_default(nmb));
 		rxdp->read.hdr_addr = 0;
@@ -1180,6 +1184,7 @@ eth_igb_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		if (unlikely(rxq->crc_len > 0)) {
 			first_seg->pkt_len -= RTE_ETHER_CRC_LEN;
 			if (data_len <= RTE_ETHER_CRC_LEN) {
+				// if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(rxm);
 				rte_pktmbuf_free_seg(rxm);
 				first_seg->nb_segs--;
 				last_seg->data_len = (uint16_t)
@@ -1291,6 +1296,7 @@ igb_tx_queue_release_mbufs(struct igb_tx_queue *txq)
 	if (txq->sw_ring != NULL) {
 		for (i = 0; i < txq->nb_tx_desc; i++) {
 			if (txq->sw_ring[i].mbuf != NULL) {
+				// if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(txq->sw_ring[i].mbuf);
 				rte_pktmbuf_free_seg(txq->sw_ring[i].mbuf);
 				txq->sw_ring[i].mbuf = NULL;
 			}
@@ -1371,6 +1377,7 @@ igb_tx_done_cleanup(struct igb_tx_queue *txq, uint32_t free_cnt)
 				 */
 				do {
 					if (sw_ring[tx_id].mbuf) {
+						// if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(sw_ring[tx_id].mbuf);
 						rte_pktmbuf_free_seg(
 							sw_ring[tx_id].mbuf);
 						sw_ring[tx_id].mbuf = NULL;
@@ -1617,6 +1624,7 @@ igb_rx_queue_release_mbufs(struct igb_rx_queue *rxq)
 	if (rxq->sw_ring != NULL) {
 		for (i = 0; i < rxq->nb_rx_desc; i++) {
 			if (rxq->sw_ring[i].mbuf != NULL) {
+				// if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(rxq->sw_ring[i].mbuf);
 				rte_pktmbuf_free_seg(rxq->sw_ring[i].mbuf);
 				rxq->sw_ring[i].mbuf = NULL;
 			}
@@ -2285,7 +2293,7 @@ igb_alloc_rx_queue_mbufs(struct igb_rx_queue *rxq)
 		rxd->read.hdr_addr = 0;
 		rxd->read.pkt_addr = dma_addr;
 		rxe[i].mbuf = mbuf;
-		if (dbchecker_activate_mtdt_hook) dbchecker_activate_mtdt_hook(mbuf, DMA_FROM_DEVICE);
+		if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(mbuf, DMA_FROM_DEVICE);
 	}
 
 	return 0;
