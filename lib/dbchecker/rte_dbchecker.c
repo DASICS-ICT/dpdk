@@ -492,7 +492,7 @@ void dbchecker_dma_zone_alloc_hook(const struct rte_memzone *mz)
         /* update memzone iova so drivers program the device with the
          * address that has associated MTDT metadata. Cast away const to
          * update the internal memzone descriptor. */
-        struct rte_memzone *mz_nc = (struct rte_memzone *)mz;
+        struct rte_memzone *mz_nc = (struct rte_memzone *)(uintptr_t)mz;
         mz_nc->iova = (rte_iova_t)new_iova;
         dbchecker_activate_mtdt(new_iova, DMA_BIDIRECTIONAL);
         DBCHECKER_DEBUG_LOG("dbchecker_dma_zone_alloc_hook: updated memzone '%s' iova 0x%llx -> 0x%llx\n",
@@ -504,7 +504,7 @@ void dbchecker_dma_zone_free_hook(const struct rte_memzone *mz)
 {
     if (!mz || uio_map == NULL || !mz->iova)
         return;
-    struct rte_memzone *mz_nc = (struct rte_memzone *)mz;
+    struct rte_memzone *mz_nc = (struct rte_memzone *)(uintptr_t)mz;
     mz_nc->iova = dbchecker_free_mtdt((dma_addr_t)mz_nc->iova);
     DBCHECKER_DEBUG_LOG("dbchecker_dma_zone_free_hook: freed memzone '%s' iova 0x%llx\n",
         mz_nc->name, (unsigned long long)mz_nc->iova);
