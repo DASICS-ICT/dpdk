@@ -31,6 +31,7 @@
 #define DEFAULT_BURST_SIZE 64
 #define DEFAULT_PKT_SIZE 64
 #define DEFAULT_SECONDS 3600
+#define MBUF_POOL_SIZE 512
 
 static uint16_t g_port_id = 0;
 static uint16_t g_queue_id = 0;
@@ -154,9 +155,9 @@ static int port_init(uint16_t port, struct rte_mempool *mp)
 static int tx_worker(void *arg)
 {
     (void)arg;
-    struct rte_mbuf *bufs[512];
-    struct rte_mbuf *bad_bufs[512];
-    uint32_t burst = g_burst > 512 ? 512 : g_burst;
+    struct rte_mbuf *bufs[MBUF_POOL_SIZE];
+    struct rte_mbuf *bad_bufs[MBUF_POOL_SIZE];
+    uint32_t burst = g_burst > MBUF_POOL_SIZE ? MBUF_POOL_SIZE : g_burst;
 
     uint64_t tsc_hz = rte_get_tsc_hz();
     uint64_t deadline = 0;
@@ -165,38 +166,33 @@ static int tx_worker(void *arg)
     int rv = 0;
     uint16_t i;
 
-    /* tx_worker now performs mbuf alloc/fill/send/free locally to preserve
-     * single-threaded alloc/free ownership for mbufs. The main thread only
-     * prepares a template buffer (`g_template`) to minimize per-packet work.
-     */
-
-    do {
-        rv = rte_pktmbuf_alloc_bulk(g_mp, bufs, burst);
-    } while (rv != 0);
-
-    /* fill payload from template; track any failure to append */
-    uint32_t valid = 0;
-    uint32_t bad = 0;
-    do {
-        for (uint32_t i = 0; i < burst; i++) {
-            struct rte_mbuf *m = bufs[i];
-            char *pkt = (char *)rte_pktmbuf_append(m, g_frame_len);
-            if (pkt == NULL) {
-                bad_bufs[bad++] = m;
-                continue;
-            }
-            /* copy prebuilt template (ethernet header + payload) */
-            rte_memcpy(pkt, g_template, g_frame_len);
-            bufs[valid++] = m;
-        }
-    } while (valid == 0);
-    /* free any mbufs that failed to be appended */
-    if (bad > 0) rte_pktmbuf_free_bulk(bad_bufs, bad);
-
     uint64_t t = rte_rdtsc();
     if (g_start_tsc == 0) g_start_tsc = t;
     deadline = g_start_tsc + (uint64_t)g_seconds * tsc_hz;
     while (!g_stop) {
+        rv = rte_pktmbuf_alloc_bulk(g_mp, bufs, burst);
+        if (unlikely(rv != 0)) {
+            rte_exit(EXIT_FAILURE, "tx_worker: rte_pktmbuf_alloc_bulk failed\n");
+        }
+
+        /* fill payload from template; track any failure to append */
+        uint32_t valid = 0;
+        uint32_t bad = 0;
+        do {
+            for (uint32_t i = 0; i < burst; i++) {
+                struct rte_mbuf *m = bufs[i];
+                char *pkt = (char *)rte_pktmbuf_append(m, g_frame_len);
+                if (pkt == NULL) {
+                    bad_bufs[bad++] = m;
+                    continue;
+                }
+                /* copy prebuilt template (ethernet header + payload) */
+                rte_memcpy(pkt, g_template, g_frame_len);
+                bufs[valid++] = m;
+            }
+        } while (valid == 0);
+        /* free any mbufs that failed to be appended */
+        if (bad > 0) rte_pktmbuf_free_bulk(bad_bufs, bad);
         /* send as many as possible; tx_burst may return partial sends */
         #ifdef RTE_ENABLE_DBCHECKER
             for (i = 0; i < valid; i++) {
@@ -212,15 +208,9 @@ static int tx_worker(void *arg)
             local_bytes += (uint64_t)n * g_frame_len;
         }
         #ifdef RTE_ENABLE_DBCHECKER
-            // i = dbchecker_err_handler();
-            // if (i != 0) {
-            //     rte_exit(EXIT_FAILURE, "DBChecker detected errors, exiting\n");
+            // for (i = 0; i < valid; i++) {
+            //     dbchecker_free_mtdt_hook(bufs[i]);
             // }
-
-            for (i = 0; i < valid; i++) {
-                dbchecker_free_mtdt_hook(bufs[i]);
-                //dbchecker_free_all_mtdt();
-            }
         #endif
 
         if (rte_rdtsc() >= deadline)
@@ -263,9 +253,9 @@ static int rx_worker(void *arg)
         /* free received mbufs in bulk */
         rte_pktmbuf_free_bulk(bufs, nb);
         #ifdef RTE_ENABLE_DBCHECKER
-            for (i = 0; i < nb; i++) {
-                dbchecker_free_mtdt_hook(bufs[i]);
-            }
+            // for (i = 0; i < nb; i++) {
+            //     dbchecker_free_mtdt_hook(bufs[i]);
+            // }
         #endif
         if (rte_rdtsc() >= deadline)
             break;
@@ -319,8 +309,8 @@ int main(int argc, char **argv)
         memset(&link, 0, sizeof(link));
         printf("Waiting for link to come up on port %u...\n", g_port_id);
         while (wait_secs < 30) {
-            rte_eth_link_get_nowait(g_port_id, &link);
-            if (link.link_status == RTE_ETH_LINK_UP) {
+            ret = rte_eth_link_get_nowait(g_port_id, &link);
+            if (ret == 0 && link.link_status == RTE_ETH_LINK_UP) {
                 printf("Port %u Link Up - speed %u Mbps - %s\n",
                        g_port_id, (unsigned)link.link_speed,
                        (link.link_duplex == RTE_ETH_LINK_FULL_DUPLEX) ? "full-duplex" : "half-duplex");

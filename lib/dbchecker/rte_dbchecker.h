@@ -17,29 +17,18 @@ enum dma_data_direction {
     DMA_TO_DEVICE = 2
 };
 
-static rte_spinlock_t my_lock;
-
 #define DBCHECKER_BASE_ADDR 0x40000000ULL
-#define DBCHECKER_REG_SIZE 4 /* 32bit */
-#define DBCHECKER_REG_NUM 10 /* 10 registers */
+#define DBCHECKER_MAP_SIZE  0x20000ULL
 
 #define DBCHECKER_EN_OFFSET          0x00U
-#define DBCHECKER_MTDT_0_OFFSET      0x04U
-#define DBCHECKER_MTDT_1_OFFSET      0x08U
-#define DBCHECKER_MTDT_2_OFFSET      0x0CU
-#define DBCHECKER_CMD_OFFSET         0x10U
-#define DBCHECKER_ERR_ADDR_LO_OFFSET 0x14U
-#define DBCHECKER_ERR_ADDR_HI_OFFSET 0x18U
-#define DBCHECKER_ERR_INFO_OFFSET    0x1CU
-#define DBCHECKER_ERR_CNT_OFFSET     0x20U
+#define DBCHECKER_ERR_ADDR_LO_OFFSET 0x04U
+#define DBCHECKER_ERR_ADDR_HI_OFFSET 0x08U
+#define DBCHECKER_ERR_INFO_OFFSET    0x0CU
+#define DBCHECKER_ERR_CNT_OFFSET     0x10U
+#define DBCHECKER_CLR_ERR_OFFSET     0x14U
+#define DBCHECKER_MTDT_SRAM_OFFSET   0x20U
 
 #define MAX_DBTE_TABLE_SIZE 4096
-
-enum dbchecker_cmd_op {
-  DBCHECKER_OP_FREE,
-  DBCHECKER_OP_CLEAR,
-  DBCHECKER_OP_ALLOC,
-};
 
 enum dbchecker_rw_mode {
     DBCHECKER_RWMODE_INVALID,
@@ -52,24 +41,15 @@ enum dbchecker_rw_mode {
 struct dbchecker_mtdt {
     uint64_t lo_bnd    : 48;
     uint64_t up_bnd_lo : 16;
-    uint32_t up_bnd_hi : 32;
-    uint32_t imm   : 28;
-    uint32_t status: 1;
-    uint32_t op    : 2;
-    uint32_t v     : 1;
-};
-
-struct dbchecker_cmd {
-  uint32_t imm    : 28; /* index of the mtdt to be cleaned */
-  uint32_t status : 1;
-  uint32_t op     : 2;
-  uint32_t v      : 1;
-  struct dbchecker_mtdt* mtdt;
-};
+    uint64_t up_bnd_hi : 32;
+    uint64_t index     : 12;
+    uint64_t wr        : 2; // 00: invalid, 01: RO, 10: WO, 11: RW
+    uint64_t v         : 1;
+    uint64_t rsvd      : 17;
+} __attribute__((packed));
 
 #define DBCHECKER_ENABLE_MASK 0x1UL /* bypass device 31 by default */
 #define DBCHECKER_DISABLE_MASK 0x0UL
-#define UNTRUST_DEV_ID 0x0U
 
 #define DBCHECKER_DEBUG 0
 
@@ -82,16 +62,10 @@ struct dbchecker_cmd {
 /* Public API */
 int dbchecker_init(const char *dev);
 void dbchecker_exit(void);
-int dbchecker_command(struct dbchecker_cmd *cmd);
 void dbchecker_en_set(uint32_t dev_mask);
 uint32_t dbchecker_en_get(void);
 dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir);
 dma_addr_t dbchecker_free_mtdt(dma_addr_t addr);
-int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir);
-int dbchecker_deactivate_mtdt(dma_addr_t addr);
-void dbchecker_free_all_mtdt(void);
-int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir);
-int dbchecker_deactivate_mtdt_hook(struct rte_mbuf *m);
 int dbchecker_err_handler(void);
 int dbchecker_module_init_hook(void);
 void dbchecker_module_exit_hook(void);
