@@ -26,7 +26,7 @@
     #include <rte_dbchecker.h>
 #endif
 
-#define NUM_MBUFS 16384
+#define DEFAULT_NUM_MBUFS 4096
 #define MBUF_CACHE_SIZE 250
 #define DEFAULT_BURST_SIZE 64
 #define DEFAULT_PKT_SIZE 64
@@ -40,6 +40,7 @@ static uint32_t g_seconds = DEFAULT_SECONDS;
 static int g_mode_tx = 1; /* default TX */
 static struct rte_ether_addr g_dst_mac;
 static int g_have_dst_mac = 0;
+static uint32_t g_num_mbufs = DEFAULT_NUM_MBUFS; 
 
 struct perf_stats {
     uint64_t total_bytes;
@@ -62,7 +63,8 @@ static uint32_t g_frame_len = 0;
 
 static void usage(const char *prg)
 {
-    printf("Usage: %s [EAL args] -- [--tx|--rx] [--port N] [--queue Q] [--burst B] [--size S] [--seconds T] [--interval-ms T] [--dst-mac xx:xx:xx:xx:xx:xx]\n", prg);
+    printf("Usage: %s [EAL args] -- [--tx|--rx] [--port N] [--queue Q] [--burst B] [--size S] [--seconds T] [--mbufs N] [--dst-mac xx:xx:xx:xx:xx:xx]\n", prg);
+    printf("  --mbufs N: Set number of mbufs (range: 4096-65536, default: %d)\n", DEFAULT_NUM_MBUFS);
 }
 
 static volatile sig_atomic_t g_stop;
@@ -94,6 +96,13 @@ static void parse_app_args(int argc, char **argv)
         else if (strcmp(argv[i], "--burst") == 0 && i + 1 < argc) g_burst = (uint32_t)atoi(argv[++i]);
         else if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) g_pkt_size = (uint32_t)atoi(argv[++i]);
         else if (strcmp(argv[i], "--seconds") == 0 && i + 1 < argc) g_seconds = (uint32_t)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--mbufs") == 0 && i + 1 < argc) {
+            int val = atoi(argv[++i]);
+            if (val < 4096 || val > 65536) {
+                rte_exit(EXIT_FAILURE, "Invalid mbufs count: %d. Range must be 4096-65536\n", val);
+            }
+            g_num_mbufs = (uint32_t)val;
+        }
         else if (strcmp(argv[i], "--dst-mac") == 0 && i + 1 < argc) {
             if (parse_mac(argv[++i], &g_dst_mac) == 0)
                 g_have_dst_mac = 1;
@@ -192,7 +201,7 @@ static int tx_worker(void *arg)
         if (bad > 0) rte_pktmbuf_free_bulk(bad_bufs, bad);
         /* send as many as possible; tx_burst may return partial sends */
         #ifdef RTE_ENABLE_DBCHECKER
-            for (i = 0; i < valid; i++) {
+            for (uint16_t i = 0; i < valid; i++) {
                 dbchecker_activate_mtdt_hook(bufs[i], DMA_TO_DEVICE);
             }
         #endif
@@ -290,7 +299,8 @@ int main(int argc, char **argv)
     if (nb_ports == 0) rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
     if (g_port_id >= nb_ports) rte_exit(EXIT_FAILURE, "Invalid port id %u\n", g_port_id);
 
-    struct rte_mempool *mp = rte_pktmbuf_pool_create("MBUF_POOL", NUM_MBUFS,
+    printf("Creating mbuf pool with %u mbufs...\n", g_num_mbufs);
+    struct rte_mempool *mp = rte_pktmbuf_pool_create("MBUF_POOL", g_num_mbufs,
         MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
     if (mp == NULL) rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 
