@@ -249,9 +249,6 @@ static int rx_worker(void *arg)
             continue;
         }
 
-        /* count and free received mbufs locally to ensure RX-side alloc/free on same thread */
-        uint64_t totlen = 0;
-        for (i = 0; i < nb; i++) totlen += g_pkt_size;//rte_pktmbuf_pkt_len(bufs[i]);
         /* free received mbufs in bulk */
         rte_pktmbuf_free_bulk(bufs, nb);
         #ifdef RTE_ENABLE_DBCHECKER
