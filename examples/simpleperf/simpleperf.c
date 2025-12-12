@@ -27,7 +27,7 @@
 #endif
 
 #define DEFAULT_NUM_MBUFS 4096
-#define MBUF_CACHE_SIZE 250
+#define MBUF_CACHE_SIZE 256
 #define DEFAULT_BURST_SIZE 64
 #define DEFAULT_PKT_SIZE 64
 #define DEFAULT_SECONDS 3600
@@ -59,7 +59,6 @@ static struct rte_mempool *g_mp = NULL; /* global mempool for main core */
 /* packet template prepared by main to minimize per-packet construction in tx_worker */
 static uint8_t *g_template = NULL;
 static uint32_t g_frame_len = 0;
-
 
 static void usage(const char *prg)
 {
@@ -114,19 +113,28 @@ static void parse_app_args(int argc, char **argv)
     }
 }
 
-static void print_stats(const char *title, struct perf_stats *s, uint32_t pkt_size)
+static void print_stats(uint16_t port, struct perf_stats *s)
 {
+    struct rte_eth_stats rs;
+    int rc = rte_eth_stats_get(port, &rs);
+    if (rc < 0) {
+        printf("[port %u]: rte_eth_stats_get failed: %s (%d)\n",
+               port, rte_strerror(-rc), rc);
+        return;
+    }
     double hz = (double)rte_get_tsc_hz();
     double seconds = (double)(s->end_tsc - s->start_tsc) / hz;
-    double mbps = (double)s->total_bytes * 8.0 / (seconds * 1e6);
-    double pps = (double)s->total_packets / seconds;
-    printf("\n===== %s =====\n", title);
-    printf("Total packets: %" PRIu64 "\n", s->total_packets);
-    printf("Total bytes:   %" PRIu64 "\n", s->total_bytes);
+    double mbps = (double)(rs.ibytes + rs.obytes) * 8.0 / (seconds * 1e6);
+    double pps = (double)(rs.ipackets + rs.opackets) / seconds;
+
+    printf("ipackets=%" PRIu64 "  ibytes=%" PRIu64 "\n", rs.ipackets, rs.ibytes);
+    printf("opackets=%" PRIu64 "  obytes=%" PRIu64 "\n", rs.opackets, rs.obytes);
+    printf("ierrors=%" PRIu64 "   oerrors=%" PRIu64 "\n", rs.ierrors, rs.oerrors);
+    printf("imissed=%" PRIu64 "\n", rs.imissed);
     printf("Duration:      %.6f s\n", seconds);
     printf("Bandwidth:     %.3f Mbps\n", mbps);
     printf("Throughput:    %.2f pkt/s\n", pps);
-    printf("Pkt size:      %u bytes\n", pkt_size);
+    printf("Pkt size:      %u bytes\n", g_pkt_size);
     printf("============================\n");
 }
 
@@ -154,7 +162,7 @@ static int port_init(uint16_t port, struct rte_mempool *mp)
 
     ret = rte_eth_dev_start(port);
     if (ret < 0) return ret;
-
+    rte_eth_stats_reset(port);
     rte_eth_promiscuous_enable(port);
     return 0;
 }
@@ -169,8 +177,6 @@ static int tx_worker(void *arg)
 
     uint64_t tsc_hz = rte_get_tsc_hz();
     uint64_t deadline = 0;
-    uint64_t local_packets = 0;
-    uint64_t local_bytes = 0;
     int rv = 0;
 
     uint64_t t = rte_rdtsc();
@@ -208,24 +214,15 @@ static int tx_worker(void *arg)
         uint16_t sent = 0;
         while (sent < (uint16_t)valid) {
             uint16_t n = rte_eth_tx_burst(g_port_id, g_queue_id, &bufs[sent], valid - sent);
-            if (n == 0) break;
+            if (n == 0) continue;
             sent += n;
-            local_packets += n;
-            local_bytes += (uint64_t)n * g_frame_len;
         }
-        #ifdef RTE_ENABLE_DBCHECKER
-            // for (i = 0; i < valid; i++) {
-            //     dbchecker_deactivate_mtdt_hook(bufs[i]);
-            // }
-        #endif
 
         if (rte_rdtsc() >= deadline)
             break;
     }
     g_end_tsc = rte_rdtsc();
     /* publish local counters to globals once (no atomics) */
-    g_total_packets = local_packets;
-    g_total_bytes = local_bytes;
     g_worker_done = 1;
     return 0;
 }
@@ -237,8 +234,6 @@ static int rx_worker(void *arg)
     uint32_t burst = g_burst > 512 ? 512 : g_burst;
     uint64_t tsc_hz = rte_get_tsc_hz();
     uint64_t deadline = 0;
-    uint64_t local_packets = 0;
-    uint64_t local_bytes = 0;
     uint16_t i;
 
     uint64_t t = rte_rdtsc();
@@ -253,9 +248,7 @@ static int rx_worker(void *arg)
 
         /* count and free received mbufs locally to ensure RX-side alloc/free on same thread */
         uint64_t totlen = 0;
-        for (i = 0; i < nb; i++) totlen += rte_pktmbuf_pkt_len(bufs[i]);
-        local_packets += nb;
-        local_bytes += totlen;
+        for (i = 0; i < nb; i++) totlen += g_pkt_size;//rte_pktmbuf_pkt_len(bufs[i]);
         /* free received mbufs in bulk */
         rte_pktmbuf_free_bulk(bufs, nb);
         #ifdef RTE_ENABLE_DBCHECKER
@@ -269,8 +262,6 @@ static int rx_worker(void *arg)
 
     g_end_tsc = rte_rdtsc();
     /* publish RX counters to globals (no atomics) */
-    g_total_packets = local_packets;
-    g_total_bytes = local_bytes;
     g_worker_done = 1;
     return 0;
 }
@@ -333,8 +324,6 @@ int main(int argc, char **argv)
         g_mode_tx ? "TX" : "RX", g_port_id, g_queue_id, g_burst, g_pkt_size, g_seconds);
 
     /* initialize shared counters (published by worker at end) */
-    g_total_packets = 0;
-    g_total_bytes = 0;
     g_worker_done = 0;
     g_start_tsc = 0;
     g_end_tsc = 0;
@@ -368,11 +357,10 @@ int main(int argc, char **argv)
 #endif
     /* final summary print */
     struct perf_stats s = {0};
-    s.total_packets = (uint64_t)g_total_packets;
-    s.total_bytes = (uint64_t)g_total_bytes;
     s.start_tsc = g_start_tsc ? g_start_tsc : rte_rdtsc();
     s.end_tsc = g_end_tsc ? g_end_tsc : rte_rdtsc();
-    print_stats(g_mode_tx ? "TX Throughput Statistics" : "RX Throughput Statistics", &s, g_mode_tx ? g_pkt_size : 0);
+    printf("\n==== %s ETH stats port=%u ====\n", g_mode_tx ? "TX" : "RX", g_port_id);
+    print_stats(g_port_id, &s);
     if (g_template) {
         free(g_template);
         g_template = NULL;
