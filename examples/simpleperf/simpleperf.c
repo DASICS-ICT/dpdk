@@ -317,8 +317,8 @@ int main(int argc, char **argv)
             printf("Port %u: link not up after %u seconds, continuing anyway\n", g_port_id, wait_secs);
     }
 
-    printf("Starting %s test on port %u queue %u burst=%u size=%u s=%u... \n",
-        g_mode_tx ? "TX" : "RX", g_port_id, g_queue_id, g_burst, g_pkt_size, g_seconds);
+    printf("Starting %s test on port %u queue %u burst=%u size=%u mbufs=%u s=%u... \n",
+        g_mode_tx ? "TX" : "RX", g_port_id, g_queue_id, g_burst, g_pkt_size, g_num_mbufs, g_seconds);
 
     /* initialize shared counters (published by worker at end) */
     g_worker_done = 0;
