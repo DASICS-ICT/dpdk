@@ -24,6 +24,8 @@
 /* public declarations and definitions */
 #include "rte_dbchecker.h"
 
+#define TEST_DBTE_CACHE_HIT
+
 static uint16_t dbte_alloc_id = 0;
 static uint8_t dbchecker_enable = 0;
 static char uio_device[256] = "/dev/uio0";
@@ -186,7 +188,11 @@ dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_dire
 
     /* fill index_off from low 4 bits (offset) as before */
     mtdt.index_off = (idx & 0xFUL);
-    mtdt.v = 0;
+    #ifdef TEST_DBTE_CACHE_HIT
+        mtdt.v = 1;
+    #else
+        mtdt.v = 0;
+    #endif
 
     /* construct returned iova with table index in high bits as previous design */
     alloc_addr = (addr & 0xFFFFFFFFFFFFULL) | ((uint64_t)idx << 48);
@@ -263,15 +269,17 @@ int dbchecker_err_handler(void){
 }
 
 int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir){
-    if (!dbchecker_enable)
-        return 0; // dbchecker not enabled
+    #ifndef TEST_DBTE_CACHE_HIT
+        if (!dbchecker_enable)
+            return 0; // dbchecker not enabled
 
-    uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
-    dbte_table[index].wr = (dir == DMA_BIDIRECTIONAL) ? DBCHECKER_RWMODE_RW :
-              (dir == DMA_FROM_DEVICE) ? DBCHECKER_RWMODE_WO :
-              (dir == DMA_TO_DEVICE) ? DBCHECKER_RWMODE_RO :
-               DBCHECKER_RWMODE_INVALID;
-    dbte_table[index].v = 1;
+        uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
+        dbte_table[index].wr = (dir == DMA_BIDIRECTIONAL) ? DBCHECKER_RWMODE_RW :
+                (dir == DMA_FROM_DEVICE) ? DBCHECKER_RWMODE_WO :
+                (dir == DMA_TO_DEVICE) ? DBCHECKER_RWMODE_RO :
+                DBCHECKER_RWMODE_INVALID;
+        dbte_table[index].v = 1;
+    #endif
     return 0;
 }
 
@@ -285,18 +293,22 @@ int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir
 }
 
 int dbchecker_deactivate_mtdt(dma_addr_t addr){
-    if (!dbchecker_enable) 
-        return 0; // dbchecker not enabled
+    #ifndef TEST_DBTE_CACHE_HIT
+        if (!dbchecker_enable) 
+            return 0; // dbchecker not enabled
 
-    uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
-    dbte_table[index].v = 0;
-    struct dbchecker_cmd free_cmd;
-    memset(&free_cmd, 0, sizeof(free_cmd));
-    free_cmd.v  = 1;
-    free_cmd.op = DBCHECKER_OP_FREE;
-    free_cmd.imm = index;
-    //printf("deactivate index %x\n", index);
-    return dbchecker_command(&free_cmd);
+        uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
+        dbte_table[index].v = 0;
+        struct dbchecker_cmd free_cmd;
+        memset(&free_cmd, 0, sizeof(free_cmd));
+        free_cmd.v  = 1;
+        free_cmd.op = DBCHECKER_OP_FREE;
+        free_cmd.imm = index;
+        //printf("deactivate index %x\n", index);
+        return dbchecker_command(&free_cmd);
+    #else
+        return 0;
+    #endif
 }
 
 int dbchecker_deactivate_mtdt_hook(struct rte_mbuf *m){
