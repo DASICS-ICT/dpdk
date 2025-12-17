@@ -197,7 +197,7 @@ static int tx_worker(void *arg)
                 char *pkt = (char *)rte_pktmbuf_append(m, g_frame_len);
                 if (pkt == NULL) {
                     bad_bufs[bad++] = m;
-                    continue;
+                    goto tx_round_done;
                 }
                 /* copy prebuilt template (ethernet header + payload) */
                 rte_memcpy(pkt, g_template, g_frame_len);
@@ -218,7 +218,7 @@ static int tx_worker(void *arg)
             if (n == 0) continue;
             sent += n;
         }
-
+tx_round_done:
         if (rte_rdtsc() >= deadline)
             break;
     }
@@ -235,7 +235,6 @@ static int rx_worker(void *arg)
     uint32_t burst = g_burst > 512 ? 512 : g_burst;
     uint64_t tsc_hz = rte_get_tsc_hz();
     uint64_t deadline = 0;
-    uint16_t i;
 
     uint64_t t = rte_rdtsc();
     if (g_start_tsc == 0) g_start_tsc = t;
@@ -244,16 +243,17 @@ static int rx_worker(void *arg)
     while (!g_stop) {
         uint16_t nb = rte_eth_rx_burst(g_port_id, g_queue_id, bufs, burst);
         if (nb == 0) {
-            continue;
+            goto rx_round_done;
         }
 
         /* free received mbufs in bulk */
         rte_pktmbuf_free_bulk(bufs, nb);
         #ifdef RTE_ENABLE_DBCHECKER
-            for (i = 0; i < nb; i++) {
+            for (uint16_t i = 0; i < nb; i++) {
                 dbchecker_deactivate_mtdt_hook(bufs[i]);
             }
         #endif
+rx_round_done:
         if (rte_rdtsc() >= deadline)
             break;
     }
