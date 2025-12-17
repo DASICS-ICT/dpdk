@@ -31,6 +31,7 @@
 #define DEFAULT_BURST_SIZE 32
 #define DEFAULT_PKT_SIZE 64
 #define DEFAULT_SECONDS 3600
+#define DEV_ID 0x0U
 
 static uint16_t g_port_id = 0;
 static uint16_t g_queue_id = 0;
@@ -208,7 +209,7 @@ static int tx_worker(void *arg)
         /* send as many as possible; tx_burst may return partial sends */
         #ifdef RTE_ENABLE_DBCHECKER
             for (uint16_t i = 0; i < valid; i++) {
-                dbchecker_activate_mtdt_hook(bufs[i], DMA_TO_DEVICE);
+                dbchecker_activate_mtdt_hook(bufs[i], DMA_TO_DEVICE, DEV_ID);
             }
         #endif
         uint16_t sent = 0;

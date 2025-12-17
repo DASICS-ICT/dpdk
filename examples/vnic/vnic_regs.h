@@ -7,6 +7,12 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <stddef.h>
+#include <inttypes.h>
+
+#ifdef RTE_ENABLE_DBCHECKER
+    #include <rte_dbchecker.h>
+#endif
 
 #define VNIC_REGS_PHYS          0x11000000ULL
 #define VNIC_REG_RX_DESC        0x0ULL
@@ -34,6 +40,8 @@
 #define VNIC_STATUS_IDLE 0x0
 #define VNIC_STATUS_BUSY 0x80000000ULL
 
+#define VNIC_DEV_ID 0x1UL
+
 #define DEBUG 0
 #define VNIC_DEBUG(fmt, args...) \
 	do { \
@@ -47,14 +55,84 @@ static volatile void *vnic_rx_desc_base;
 static volatile void *vnic_rx_data_base;
 static volatile void *vnic_tx_desc_base;
 static volatile void *vnic_tx_data_base;
-static volatile void *vnic_rx_tail;
-static volatile void *vnic_rx_head;
-static volatile void *vnic_tx_tail;
-static volatile void *vnic_tx_head;
-static volatile void *vnic_status;
 
 static int reg_fd;
 static int resv_mem_fd;
+
+static void vnic_cleanup_regs(void)
+{
+	munmap((void *)(uintptr_t)vnic_regs_virt, VNIC_REGS_SIZE);
+	close(reg_fd);
+	close(resv_mem_fd);
+}
+
+static uint64_t vnic_read_reg64(uint32_t offset)
+{
+	uint64_t val;
+	val = *(volatile uint64_t *)((volatile char *)vnic_regs_virt + offset);
+	return val;
+}
+
+static void vnic_write_reg64(uint32_t offset, uint64_t val)
+{
+	*(volatile uint64_t *)((volatile char *)vnic_regs_virt + offset) = val;
+}
+
+// static uint32_t vnic_read_reg32(uint32_t offset)
+// {
+// 	uint32_t val;
+// 	val = *(volatile uint32_t *)((volatile char *)vnic_regs_virt + offset);
+// 	return val;
+// }
+
+static void vnic_write_reg32(uint32_t offset, uint32_t val)
+{
+	*(volatile uint32_t *)((volatile char *)vnic_regs_virt + offset) = val;
+}
+
+/**
+ * @brief Safe memset function for I/O memory
+ * 
+ * @param dst  Destination address (volatile void*), usually mapped virtual address
+ * @param c    Value to set (truncated to unsigned char)
+ * @param n    Number of bytes (size_t)
+ */
+static inline void io_memset(volatile void *dst, int c, size_t n)
+{
+    volatile uint8_t *u8_ptr = (volatile uint8_t *)dst;
+    uint8_t val8 = (uint8_t)c;
+    
+    // 1. Try to perform 32-bit optimized access
+    // Use 32-bit writes only if the address is 4-byte aligned and length >= 4.
+    // This prevents unaligned access faults on architectures like ARM.
+    if (((uintptr_t)u8_ptr & 0x3) == 0 && n >= 4) {
+        
+        // Expand the 8-bit value to 32-bit (e.g., 0xAB -> 0xABABABAB)
+        uint32_t val32 = (uint32_t)val8 | 
+                         ((uint32_t)val8 << 8) | 
+                         ((uint32_t)val8 << 16) | 
+                         ((uint32_t)val8 << 24);
+        
+        volatile uint32_t *u32_ptr = (volatile uint32_t *)dst;
+        size_t u32_count = n / 4;
+
+        // Core loop: Write with 32-bit width
+        while (u32_count--) {
+            *u32_ptr++ = val32;
+        }
+
+        // Update pointer and remaining length to handle the "tail"
+        u8_ptr = (volatile uint8_t *)u32_ptr;
+        n %= 4;
+    }
+
+    // 2. Handle remaining bytes (or handle unaligned start addresses)
+    // Note: If the hardware strictly forbids byte access, this part might fail
+    // for the tail, but typically VNIC memory sizes are multiples of 4.
+    while (n--) {
+        *u8_ptr++ = val8;
+    }
+}
 
 static int vnic_init_buf(void)
 {
@@ -71,14 +149,27 @@ static int vnic_init_buf(void)
 		return -1;
 	}
 
-	memset((void *)vnic_resv_mem_virt, 0, VNIC_RESV_MEM_SIZE);
+	io_memset(vnic_resv_mem_virt, 0, VNIC_RESV_MEM_SIZE);
 
-	vnic_rx_desc_base = vnic_resv_mem_virt + VNIC_RESV_RX_DESC;
-	vnic_rx_data_base = vnic_resv_mem_virt + VNIC_RESV_RX_DATA;
-	vnic_tx_desc_base = vnic_resv_mem_virt + VNIC_RESV_TX_DESC;
-	vnic_tx_data_base = vnic_resv_mem_virt + VNIC_RESV_TX_DATA;
+	vnic_rx_desc_base = (volatile void*)((volatile char*)vnic_resv_mem_virt + VNIC_RESV_RX_DESC);
+	vnic_rx_data_base = (volatile void*)((volatile char*)vnic_resv_mem_virt + VNIC_RESV_RX_DATA);
+	vnic_tx_desc_base = (volatile void*)((volatile char*)vnic_resv_mem_virt + VNIC_RESV_TX_DESC);
+	vnic_tx_data_base = (volatile void*)((volatile char*)vnic_resv_mem_virt + VNIC_RESV_TX_DATA);
 
 	return 0;
+}
+
+static void vnic_dump_regs(void)
+{
+	VNIC_DEBUG("VNIC RX DESC Base: 0x%llx\n", (unsigned long long)vnic_read_reg64(VNIC_REG_RX_DESC));
+	VNIC_DEBUG("VNIC RX DATA Base: 0x%llx\n", (unsigned long long)vnic_read_reg64(VNIC_REG_RX_DATA));
+	VNIC_DEBUG("VNIC TX DESC Base: 0x%llx\n", (unsigned long long)vnic_read_reg64(VNIC_REG_TX_DESC));
+	VNIC_DEBUG("VNIC TX DATA Base: 0x%llx\n", (unsigned long long)vnic_read_reg64(VNIC_REG_TX_DATA));
+	VNIC_DEBUG("VNIC RX Tail: 0x%llx\n", (unsigned long long)vnic_read_reg64(VNIC_REG_RX_TAIL));
+	VNIC_DEBUG("VNIC RX Head: 0x%llx\n", (unsigned long long)vnic_read_reg64(VNIC_REG_RX_HEAD));
+	VNIC_DEBUG("VNIC TX Tail: 0x%llx\n", (unsigned long long)vnic_read_reg64(VNIC_REG_TX_TAIL));
+	VNIC_DEBUG("VNIC TX Head: 0x%llx\n", (unsigned long long)vnic_read_reg64(VNIC_REG_TX_HEAD));
+	VNIC_DEBUG("VNIC Status: 0x%llx\n", (unsigned long long)vnic_read_reg64(VNIC_REG_STATUS));
 }
 
 static int vnic_init_regs(void)
@@ -96,87 +187,26 @@ static int vnic_init_regs(void)
 		return -1;
 	}
 
-	memset((void *)vnic_regs_virt, 0, VNIC_REGS_SIZE);
-	vnic_write_reg64(VNIC_REG_RX_DESC, VNIC_RESV_MEM_PHYS + VNIC_RESV_RX_DESC);
-	vnic_write_reg64(VNIC_REG_RX_DATA, VNIC_RESV_MEM_PHYS + VNIC_RESV_RX_DATA);
-	vnic_write_reg64(VNIC_REG_TX_DESC, VNIC_RESV_MEM_PHYS + VNIC_RESV_TX_DESC);
-	vnic_write_reg64(VNIC_REG_TX_DATA, VNIC_RESV_MEM_PHYS + VNIC_RESV_TX_DATA);
-
+	io_memset(vnic_regs_virt, 0, VNIC_REGS_SIZE);
+	#ifndef RTE_ENABLE_DBCHECKER
+		vnic_write_reg64(VNIC_REG_RX_DESC, VNIC_RESV_MEM_PHYS + VNIC_RESV_RX_DESC);
+		vnic_write_reg64(VNIC_REG_RX_DATA, VNIC_RESV_MEM_PHYS + VNIC_RESV_RX_DATA);
+		vnic_write_reg64(VNIC_REG_TX_DESC, VNIC_RESV_MEM_PHYS + VNIC_RESV_TX_DESC);
+		vnic_write_reg64(VNIC_REG_TX_DATA, VNIC_RESV_MEM_PHYS + VNIC_RESV_TX_DATA);
+	#else
+		dma_addr_t rxq_phys = 
+			dbchecker_alloc_mtdt((dma_addr_t)(VNIC_RESV_MEM_PHYS + VNIC_RESV_RX_DESC),
+					VNIC_DESC_SIZE * VNIC_MAX_QUEUE_DEPTH, DMA_BIDIRECTIONAL);
+			dbchecker_activate_mtdt(rxq_phys, DMA_BIDIRECTIONAL, VNIC_DEV_ID);
+		dma_addr_t txq_phys = 
+			dbchecker_alloc_mtdt((dma_addr_t)(VNIC_RESV_MEM_PHYS + VNIC_RESV_TX_DESC),
+					VNIC_DESC_SIZE * VNIC_MAX_QUEUE_DEPTH, DMA_BIDIRECTIONAL);
+			dbchecker_activate_mtdt(txq_phys, DMA_BIDIRECTIONAL, VNIC_DEV_ID);
+		vnic_write_reg64(VNIC_REG_RX_DESC, rxq_phys);
+		vnic_write_reg64(VNIC_REG_TX_DESC, txq_phys);
+	#endif
+	vnic_dump_regs();
 	return 0;
-}
-
-static void vnic_flush_cache(void)
-{
-
-	uint64_t cache_block_size = 64;
-	uint64_t cache_sets = 128;
-	uint64_t cache_size = 32768;
-	uint64_t cache_associativity = cache_size / (cache_block_size * cache_sets);
-	uint8_t *buffer = malloc(2 * cache_size);
-	if (!buffer) {
-		return;
-	}
-	uint8_t *v_buffer = buffer;
-	int set, way;
-	uint8_t *ptr;
-	for (set = 0; set < cache_sets; set++) {
-		for (way = 0; way < cache_associativity; way++) {
-			// 计算当前目标地址：基址 + 块偏移 + 组偏移 + 路偏移
-			ptr = v_buffer + (set * cache_block_size) + (way * cache_sets * cache_block_size);
-			*ptr = 1;
-		}
-	}
-	free(buffer);
-}
-
-void vnic_cleanup_regs(void)
-{
-	munmap((void *)vnic_regs_virt, VNIC_REGS_SIZE);
-	close(reg_fd);
-	close(resv_mem_fd);
-}
-
-uint64_t vnic_read_reg64(uint32_t offset)
-{
-	uint64_t val;
-	//vnic_flush_cache();
-	val = *(volatile uint64_t *)((void *)vnic_regs_virt + offset);
-	return val;
-}
-
-void vnic_write_reg64(uint32_t offset, uint64_t val)
-{
-	*(volatile uint64_t *)((void *)vnic_regs_virt + offset) = val;
-	//vnic_flush_cache();
-}
-
-uint32_t vnic_read_reg32(uint32_t offset)
-{
-	uint32_t val;
-	//vnic_flush_cache();
-	val = *(volatile uint32_t *)((void *)vnic_regs_virt + offset);
-	return val;
-}
-
-void vnic_write_reg32(uint32_t offset, uint32_t val)
-{
-	*(volatile uint32_t *)((void *)vnic_regs_virt + offset) = val;
-	//vnic_flush_cache();
-}
-
-
-void vnic_dump_regs(void)
-{
-	VNIC_DEBUG("VNIC RX DESC Base: 0x%llx\n", vnic_read_reg64(VNIC_REG_RX_DESC));
-	VNIC_DEBUG("VNIC RX DATA Base: 0x%llx\n", vnic_read_reg64(VNIC_REG_RX_DATA));
-	VNIC_DEBUG("VNIC TX DESC Base: 0x%llx\n", vnic_read_reg64(VNIC_REG_TX_DESC));
-	VNIC_DEBUG("VNIC TX	DATA Base: 0x%llx\n", vnic_read_reg64(VNIC_REG_TX_DATA));
-	VNIC_DEBUG("VNIC RX Tail: 0x%llx\n", vnic_read_reg64(VNIC_REG_RX_TAIL));
-	VNIC_DEBUG("VNIC RX Head: 0x%llx\n", vnic_read_reg64(VNIC_REG_RX_HEAD));
-	VNIC_DEBUG("VNIC TX Tail: 0x%llx\n", vnic_read_reg64(VNIC_REG_TX_TAIL));
-	VNIC_DEBUG("VNIC TX Head: 0x%llx\n", vnic_read_reg64(VNIC_REG_TX_HEAD));
-	VNIC_DEBUG("VNIC Status: 0x%llx\n", vnic_read_reg64(VNIC_REG_STATUS));
-
 }
 
 #endif /* VNIC_REGS_H */

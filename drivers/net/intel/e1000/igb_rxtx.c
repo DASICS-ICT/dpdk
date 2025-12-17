@@ -69,7 +69,9 @@ enum dma_data_direction {
     DMA_TO_DEVICE = 2
 };
 
-extern int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir) __attribute__((weak));
+#define DEV_ID 0x0U
+
+extern int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir, uint16_t dev_id) __attribute__((weak));
 extern int dbchecker_deactivate_mtdt_hook(struct rte_mbuf *m) __attribute__((weak));
 
 /**
@@ -935,7 +937,7 @@ eth_igb_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 
 		rxm = rxe->mbuf;
 		rxe->mbuf = nmb;
-		if (dbchecker_activate_mtdt_hook) dbchecker_activate_mtdt_hook(nmb, DMA_FROM_DEVICE);
+		if (dbchecker_activate_mtdt_hook) dbchecker_activate_mtdt_hook(nmb, DMA_FROM_DEVICE, DEV_ID);
 		dma_addr =
 			rte_cpu_to_le_64(rte_mbuf_data_iova_default(nmb));
 		rxdp->read.hdr_addr = 0;
@@ -2293,7 +2295,7 @@ igb_alloc_rx_queue_mbufs(struct igb_rx_queue *rxq)
 		rxd->read.hdr_addr = 0;
 		rxd->read.pkt_addr = dma_addr;
 		rxe[i].mbuf = mbuf;
-		if (dbchecker_activate_mtdt_hook) dbchecker_activate_mtdt_hook(mbuf, DMA_FROM_DEVICE);
+		if (dbchecker_activate_mtdt_hook) dbchecker_activate_mtdt_hook(mbuf, DMA_FROM_DEVICE, DEV_ID);
 	}
 
 	return 0;

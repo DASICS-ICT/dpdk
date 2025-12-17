@@ -7,6 +7,7 @@
 #define MBUF_CACHE_SIZE 250
 #define DEFAULT_BURST_SIZE 1
 #define DEFAULT_PKT_SIZE 64
+#define REP_TIMES 100000
 
 uint64_t burst_size = DEFAULT_BURST_SIZE;
 uint64_t pkt_size = DEFAULT_PKT_SIZE;
@@ -14,6 +15,7 @@ int is_tx_thpt = 0;
 int is_tx_latency = 0;
 int is_rx_thpt = 0;
 int is_fwd = 0;
+int is_poc = 0;
 
 struct perf_stats {
 	uint64_t total_bytes;      // 总传输字节数
@@ -25,7 +27,7 @@ struct perf_stats {
 	double packets_per_sec;    // 包/秒
 };
 
-void parse_args(int argc, char** argv) {
+static void parse_args(int argc, char** argv) {
 	for (int i = 0; i < argc; i++) {
 		if (strcmp(argv[i], "--burst") == 0 && i + 1 < argc) {
 			burst_size = atoi(argv[i + 1]);
@@ -45,10 +47,13 @@ void parse_args(int argc, char** argv) {
 		if (strcmp(argv[i], "--fwd") == 0) {
 			is_fwd = 1;
 		}
+		if (strcmp(argv[i], "--poc") == 0) {
+			is_poc = 1;
+		}
 	}
 }
 
-void vnic_test_rx_throughput(struct vnic_rxtx_desc_queue *rxq, uint64_t nb_pkts, uint64_t pkt_size)
+static void vnic_test_rx_throughput(struct vnic_rxtx_desc_queue *rxq, uint64_t pkt_size)
 {
 	uint64_t nb, nb_cmpl = 0;
 	struct perf_stats *stats = malloc(sizeof(struct perf_stats));
@@ -56,7 +61,7 @@ void vnic_test_rx_throughput(struct vnic_rxtx_desc_queue *rxq, uint64_t nb_pkts,
 	stats->start_tsc = rte_rdtsc();
 
 	nb = vnic_rx_burst(rxq, burst_size, pkt_size);
-	VNIC_DEBUG("submit %lx packets for rx\n", nb);
+	VNIC_DEBUG("submit %llx packets for rx\n", (unsigned long long)nb);
 	do {
 		nb_cmpl += vnic_process_rx_completion(rxq);
 	} while (nb_cmpl != nb);
@@ -77,7 +82,7 @@ void vnic_test_rx_throughput(struct vnic_rxtx_desc_queue *rxq, uint64_t nb_pkts,
 	printf("===================================\n");
 }
 
-void vnic_test_tx_throughput(struct vnic_rxtx_desc_queue *txq, uint64_t nb_pkts, uint64_t pkt_size)
+static void vnic_test_tx_throughput(struct vnic_rxtx_desc_queue *txq, uint64_t nb_pkts, uint64_t pkt_size)
 {
 	uint64_t nb, nb_cmpl = 0;
 	struct perf_stats *stats = malloc(sizeof(struct perf_stats));
@@ -85,7 +90,7 @@ void vnic_test_tx_throughput(struct vnic_rxtx_desc_queue *txq, uint64_t nb_pkts,
 	stats->start_tsc = rte_rdtsc();
 
 	nb = vnic_tx_burst(txq, nb_pkts, pkt_size);
-	VNIC_DEBUG("submit %lx packets for tx\n", nb);
+	VNIC_DEBUG("submit %llx packets for tx\n", (unsigned long long)nb);
 	do {
 		nb_cmpl += vnic_process_tx_completion(txq);
 	} while (nb_cmpl != nb);
@@ -106,13 +111,13 @@ void vnic_test_tx_throughput(struct vnic_rxtx_desc_queue *txq, uint64_t nb_pkts,
 	printf("===================================\n");
 }
 
-int compare_double(const void *a, const void *b) {
+static int compare_double(const void *a, const void *b) {
     double da = *(const double *)a;
     double db = *(const double *)b;
     return (da > db) - (da < db);
 }
 
-double calculate_percentile(double *data, int count, double percentile) {
+static double calculate_percentile(double *data, int count, double percentile) {
     if (count == 0) return 0.0;
     
     // 计算百分位数位置（使用线性插值法）
@@ -128,18 +133,17 @@ double calculate_percentile(double *data, int count, double percentile) {
     return data[index] + fraction * (data[index + 1] - data[index]);
 }
 
-void vnic_test_tx_latency(struct vnic_rxtx_desc_queue *txq)
+static void vnic_test_tx_latency(struct vnic_rxtx_desc_queue *txq)
 {
 	int i;
-	int rep = 100000;
 	int nb, nb_cmpl = 0;
-	double latency[rep];
+	double latency[REP_TIMES];
 	double time = 0;
-	for (i = 0; i < rep; i++) {
+	for (i = 0; i < REP_TIMES; i++) {
 		time = rte_rdtsc();
 		
 		nb = vnic_tx_burst(txq, 1, 16);
-		VNIC_DEBUG("submit %lx packets for tx\n", nb);
+		VNIC_DEBUG("submit %d packets for tx\n", nb);
 		do {
 			nb_cmpl = 0;
 			nb_cmpl += vnic_process_tx_completion(txq);
@@ -148,25 +152,25 @@ void vnic_test_tx_latency(struct vnic_rxtx_desc_queue *txq)
 		latency[i] = (rte_rdtsc() - time) / rte_get_tsc_hz();
 
 	}
-	qsort(latency, rep, sizeof(double), compare_double);
+	qsort(latency, REP_TIMES, sizeof(double), compare_double);
 
 	double percentiles[] = {5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99, 99.5, 99.9};
 	int num_percentiles = sizeof(percentiles) / sizeof(percentiles[0]);
 
 	for (i = 0; i < num_percentiles; i++) {
-        double value = calculate_percentile(latency, rep, percentiles[i]);
+        double value = calculate_percentile(latency, REP_TIMES, percentiles[i]);
         printf("P%-5.1f: %.6f\n", percentiles[i], value);
     }
 }
 
-void vnic_test_fwd(struct vnic_rxtx_desc_queue *rxq, struct vnic_rxtx_desc_queue *txq, uint64_t nb_pkts, uint64_t pkt_size)
+static void vnic_test_fwd(struct vnic_rxtx_desc_queue *rxq, struct vnic_rxtx_desc_queue *txq, uint64_t nb_pkts, uint64_t pkt_size)
 {
 	printf("starting rx/tx/fwd test\n");
 	uint64_t nb_rx, nb_rx_cmpl = 0, nb_tx_cmpl = 0;
 	uint64_t next_tail, last_head;
 	uint64_t fwd_size = 32;
 	uint64_t to_process_pkts = nb_pkts;
-	int i;
+	uint64_t i;
 	struct perf_stats *stats = malloc(sizeof(struct perf_stats));
 	volatile struct vnic_rxtx_desc *tx_desc;
 	last_head = txq->last_head;
@@ -191,7 +195,7 @@ void vnic_test_fwd(struct vnic_rxtx_desc_queue *rxq, struct vnic_rxtx_desc_queue
 				break;
 			}
 			//printf("prepare tx descs\n");
-			tx_desc = (volatile struct vnic_rxtx_desc *)(vnic_resv_mem_virt + VNIC_RESV_TX_DESC + txq->tail * VNIC_DESC_SIZE);
+			tx_desc = (volatile struct vnic_rxtx_desc *)((volatile char*)vnic_resv_mem_virt + VNIC_RESV_TX_DESC + txq->tail * VNIC_DESC_SIZE);
 			tx_desc->buf = (uint64_t)(VNIC_RESV_MEM_PHYS + VNIC_RESV_RX_DATA + (rxq->tail - nb_rx_cmpl) * VNIC_DATA_SIZE);
 			tx_desc->len = pkt_size;
 			tx_desc->status = VNIC_DESC_STATUS_VALID;
@@ -223,14 +227,75 @@ void vnic_test_fwd(struct vnic_rxtx_desc_queue *rxq, struct vnic_rxtx_desc_queue
 	printf("===================================\n");
 }
 
+static void poc(struct vnic_rxtx_desc_queue *txq)
+{
+	printf("starting poc test\n\n");
+	uint64_t nb_x = 0, nb_x_cmpl = 0;
+	int i = 0;
+	// test cross boundary
+	printf("testing cross boundary\n");
+	nb_x = vnic_tx_poc(txq, VNIC_DESC_OP_CROSS_BOUNDARY);
+	if (nb_x == 0)
+		printf("alloc cross boundary tx desc failed\n");
+	do {
+			nb_x_cmpl += vnic_process_tx_completion(txq);
+			i++;
+			if (i > 100000) {
+				printf("timeout processing cross boundary\n");
+				break;
+			}
+	} while (nb_x_cmpl != nb_x);
+	#ifdef RTE_ENABLE_DBCHECKER
+		dbchecker_err_handler();
+	#endif
+	printf("\n");
+
+	// test wo ro violation
+	printf("testing wo ro violation\n");
+	nb_x = 0, nb_x_cmpl = 0;
+	nb_x = vnic_tx_poc(txq, VNIC_DESC_OP_WO_RO_VIOLATION);
+	if (nb_x == 0)
+		printf("alloc wo ro violation tx desc failed\n");
+	i = 0;
+	do {
+			nb_x_cmpl += vnic_process_tx_completion(txq);
+			i++;
+			if (i > 100000) {
+				printf("timeout processing wo ro violation\n");
+				break;
+			}
+	} while (nb_x_cmpl != nb_x);
+	#ifdef RTE_ENABLE_DBCHECKER
+		dbchecker_err_handler();
+	#endif
+	printf("\n");
+
+	// // test use after free
+	printf("testing use after free\n");
+	i = 0;
+	nb_x = 0, nb_x_cmpl = 0;
+	nb_x = vnic_tx_poc(txq, VNIC_DESC_OP_USE_AFTER_FREE);
+	if (nb_x == 0)
+		printf("alloc use after free tx desc failed\n");
+	do {
+			nb_x_cmpl += vnic_process_tx_completion(txq);
+			i++;
+			if (i > 100000) {
+				printf("timeout processing use after free\n");
+				break;
+			}
+	} while (nb_x_cmpl != nb_x);
+	#ifdef RTE_ENABLE_DBCHECKER
+		dbchecker_err_handler();
+	#endif
+	printf("\n");
+}
+
 
 int main(int argc, char *argv[])
 {
 	int ret = 0;
-	int i;
-	struct rte_mempool *mbuf_pool;
-	struct vnic_rxtx_queue *rxq, *txq;
-	uint64_t nb = 0, nb_cmpl = 0;
+	struct vnic_rxtx_desc_queue *rxq, *txq;
 
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0) {
@@ -265,7 +330,7 @@ int main(int argc, char *argv[])
 		is_rx_thpt, is_tx_thpt, is_tx_latency);
 	// RX main
 	if (is_rx_thpt)
-		vnic_test_rx_throughput(rxq, burst_size, pkt_size);
+		vnic_test_rx_throughput(rxq, pkt_size);
 
 	// TX main
 	if (is_tx_thpt)
@@ -277,6 +342,9 @@ int main(int argc, char *argv[])
 
 	if (is_fwd)
 		vnic_test_fwd(rxq, txq, burst_size, pkt_size);
+
+	if (is_poc)
+		poc(txq);
 
 	vnic_cleanup_regs();
 	vnic_free_rxtx_queues(rxq);

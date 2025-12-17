@@ -60,6 +60,7 @@ all_examples = [
         'vmdq',
         'vmdq_dcb',
         'simpleperf',
+        'vnic',
 ]
 
 # on install, skip copying all meson.build files
