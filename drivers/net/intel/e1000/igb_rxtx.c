@@ -72,6 +72,9 @@ enum dma_data_direction {
 extern int dbchecker_alloc_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir) __attribute__((weak));
 extern int dbchecker_free_mtdt_hook(struct rte_mbuf *m) __attribute__((weak));
 
+//#define TEST_DEACT_CPUTIME
+uint64_t g_deactivate_cputime = 0;
+
 /**
  * Structure associated with each descriptor of the RX ring of a RX queue.
  */
@@ -421,6 +424,8 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 	uint32_t ctx = 0;
 	union igb_tx_offload tx_offload = {0};
 	uint64_t ts;
+	struct rte_mbuf *to_free_bufs[512];
+	uint16_t free_i = 0;
 
 	txq = tx_queue;
 	sw_ring = txq->sw_ring;
@@ -569,8 +574,9 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 				RTE_MBUF_PREFETCH_TO_FREE(txn->mbuf);
 
 				if (txe->mbuf != NULL) {
-					if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(txe->mbuf);
-					rte_pktmbuf_free_seg(txe->mbuf);
+					to_free_bufs[free_i++] = txe->mbuf;
+					// if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(txe->mbuf);
+					// rte_pktmbuf_free_seg(txe->mbuf);
 					txe->mbuf = NULL;
 				}
 
@@ -599,8 +605,9 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 			txd = &txr[tx_id];
 
 			if (txe->mbuf != NULL) {
-				if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(txe->mbuf);
-				rte_pktmbuf_free_seg(txe->mbuf);
+				to_free_bufs[free_i++] = txe->mbuf;
+				// if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(txe->mbuf);
+				// rte_pktmbuf_free_seg(txe->mbuf);
 			}
 			txe->mbuf = m_seg;
 			// if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(m_seg, DMA_TO_DEVICE);
@@ -639,6 +646,19 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 		   (unsigned) txq->port_id, (unsigned) txq->queue_id,
 		   (unsigned) tx_id, (unsigned) nb_tx);
 	txq->tx_tail = tx_id;
+
+	#ifdef TEST_DEACT_CPUTIME
+		uint64_t start = rte_rdtsc();
+	#endif
+	for (uint16_t i = 0; i < free_i; i++) {
+		if (dbchecker_free_mtdt_hook) dbchecker_free_mtdt_hook(to_free_bufs[i]);
+	}
+	#ifdef TEST_DEACT_CPUTIME
+		g_deactivate_cputime += (rte_rdtsc() - start);
+	#endif
+	for (uint16_t i = 0; i < free_i; i++) {
+		rte_pktmbuf_free_seg(to_free_bufs[i]);
+	}
 
 	return nb_tx;
 }
@@ -1319,6 +1339,8 @@ void
 eth_igb_tx_queue_release(struct rte_eth_dev *dev, uint16_t qid)
 {
 	igb_tx_queue_release(dev->data->tx_queues[qid]);
+	double hz = (double)rte_get_tsc_hz();
+	printf("Deactivate CPU Time: %.6f s\n", (double)g_deactivate_cputime / hz);
 }
 
 static int
