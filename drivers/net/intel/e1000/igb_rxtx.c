@@ -70,6 +70,8 @@ enum dma_data_direction {
 };
 
 #define DEV_ID 0x0U
+//#define TEST_DEACT_CPUTIME
+uint64_t g_deactivate_cpu_time = 0;
 
 extern int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir, uint16_t dev_id) __attribute__((weak));
 extern int dbchecker_deactivate_mtdt_hook(struct rte_mbuf *m) __attribute__((weak));
@@ -423,6 +425,9 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 	uint32_t ctx = 0;
 	union igb_tx_offload tx_offload = {0};
 	uint64_t ts;
+	uint16_t free_i = 0;
+	struct rte_mbuf **to_free_bufs[512];
+
 
 	txq = tx_queue;
 	sw_ring = txq->sw_ring;
@@ -571,8 +576,7 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 				RTE_MBUF_PREFETCH_TO_FREE(txn->mbuf);
 
 				if (txe->mbuf != NULL) {
-					if (dbchecker_deactivate_mtdt_hook) dbchecker_deactivate_mtdt_hook(txe->mbuf);
-					rte_pktmbuf_free_seg(txe->mbuf);
+					to_free_bufs[free_i++] = txe->mbuf;
 					txe->mbuf = NULL;
 				}
 
@@ -601,8 +605,7 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 			txd = &txr[tx_id];
 
 			if (txe->mbuf != NULL) {
-				if (dbchecker_deactivate_mtdt_hook) dbchecker_deactivate_mtdt_hook(txe->mbuf);
-				rte_pktmbuf_free_seg(txe->mbuf);
+				to_free_bufs[free_i++] = txe->mbuf;
 			}
 			txe->mbuf = m_seg;
 
@@ -641,6 +644,17 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 		   (unsigned) txq->port_id, (unsigned) txq->queue_id,
 		   (unsigned) tx_id, (unsigned) nb_tx);
 	txq->tx_tail = tx_id;
+
+	#ifdef TEST_DEACT_CPUTIME
+		uint64_t start = rte_rdtsc();
+	#endif
+	for (uint16_t i = 0; i < free_i; i++) {
+		if (dbchecker_deactivate_mtdt_hook) dbchecker_deactivate_mtdt_hook(txe->mbuf);
+		rte_pktmbuf_free_seg(to_free_bufs[i]);
+	}
+	#ifdef TEST_DEACT_CPUTIME
+		g_deactivate_cpu_time += (rte_rdtsc() - start);
+	#endif
 
 	return nb_tx;
 }
@@ -1321,6 +1335,8 @@ void
 eth_igb_tx_queue_release(struct rte_eth_dev *dev, uint16_t qid)
 {
 	igb_tx_queue_release(dev->data->tx_queues[qid]);
+	double hz = (double)rte_get_tsc_hz();
+	printf("Deactivate CPU Time: %.6f s\n", (double)g_deactivate_cpu_time / hz);
 }
 
 static int
