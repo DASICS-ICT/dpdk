@@ -426,7 +426,7 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 	union igb_tx_offload tx_offload = {0};
 	uint64_t ts;
 	uint16_t free_i = 0;
-	struct rte_mbuf **to_free_bufs[512];
+	struct rte_mbuf *to_free_bufs[512];
 
 
 	txq = tx_queue;
@@ -649,12 +649,14 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 		uint64_t start = rte_rdtsc();
 	#endif
 	for (uint16_t i = 0; i < free_i; i++) {
-		if (dbchecker_deactivate_mtdt_hook) dbchecker_deactivate_mtdt_hook(txe->mbuf);
-		rte_pktmbuf_free_seg(to_free_bufs[i]);
+		if (dbchecker_deactivate_mtdt_hook) dbchecker_deactivate_mtdt_hook(to_free_bufs[i]);
 	}
 	#ifdef TEST_DEACT_CPUTIME
 		g_deactivate_cpu_time += (rte_rdtsc() - start);
 	#endif
+	for (uint16_t i = 0; i < free_i; i++) {
+		rte_pktmbuf_free_seg(to_free_bufs[i]);
+	}
 
 	return nb_tx;
 }

@@ -219,7 +219,7 @@ static int tx_worker(void *arg)
                 dbchecker_activate_mtdt_hook(bufs[i], DMA_TO_DEVICE, DEV_ID);
             }
             #ifdef TEST_ACT_CPUTIME
-                g_activate_cpu_time += rte_rdtsc() - start;
+                g_activate_cpu_time += (rte_rdtsc() - start);
             #endif
         #endif
         uint16_t sent = 0;
