@@ -26,6 +26,8 @@
     #include <rte_dbchecker.h>
 #endif
 
+//#define TEST_ACT_CPUTIME
+
 #define DEFAULT_NUM_MBUFS 4096
 #define MBUF_CACHE_SIZE 256
 #define DEFAULT_BURST_SIZE 32
@@ -42,6 +44,7 @@ static int g_mode_tx = 1; /* default TX */
 static struct rte_ether_addr g_dst_mac;
 static int g_have_dst_mac = 0;
 static uint32_t g_num_mbufs = DEFAULT_NUM_MBUFS; 
+static uint64_t g_activate_cpu_time = 0;
 
 struct perf_stats {
     uint64_t total_bytes;
@@ -133,6 +136,7 @@ static void print_stats(uint16_t port, struct perf_stats *s)
     printf("ierrors=%" PRIu64 "   oerrors=%" PRIu64 "\n", rs.ierrors, rs.oerrors);
     printf("imissed=%" PRIu64 "\n", rs.imissed);
     printf("Duration:      %.6f s\n", seconds);
+    printf("Activate CPU Time: %.6f s\n", (double)g_activate_cpu_time / hz);
     printf("Bandwidth:     %.3f Mbps\n", mbps);
     printf("Throughput:    %.2f pkt/s\n", pps);
     printf("Pkt size:      %u bytes\n", g_pkt_size);
@@ -208,9 +212,15 @@ static int tx_worker(void *arg)
         if (bad > 0) rte_pktmbuf_free_bulk(bad_bufs, bad);
         /* send as many as possible; tx_burst may return partial sends */
         #ifdef RTE_ENABLE_DBCHECKER
+            #ifdef TEST_ACT_CPUTIME
+                uint64_t start = rte_rdtsc();
+            #endif
             for (uint16_t i = 0; i < valid; i++) {
                 dbchecker_activate_mtdt_hook(bufs[i], DMA_TO_DEVICE, DEV_ID);
             }
+            #ifdef TEST_ACT_CPUTIME
+                g_activate_cpu_time += rte_rdtsc() - start;
+            #endif
         #endif
         uint16_t sent = 0;
         while (sent < (uint16_t)valid) {
