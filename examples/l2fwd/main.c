@@ -40,6 +40,8 @@
 
 static volatile bool force_quit;
 
+static uint64_t g_seconds = 0;
+
 /* MAC updating enabled by default */
 static int mac_updating = 1;
 
@@ -149,9 +151,11 @@ print_stats(void)
 		total_packets_rx += port_statistics[portid].rx;
 	}
 	printf("\nAggregate statistics ==============================="
+		   "\nTotal thpt: %26"PRIu64
 		   "\nTotal packets sent: %18"PRIu64
 		   "\nTotal packets received: %14"PRIu64
 		   "\nTotal packets dropped: %15"PRIu64,
+			 total_packets_tx + total_packets_rx,
 		   total_packets_tx,
 		   total_packets_rx,
 		   total_packets_dropped);
@@ -205,6 +209,7 @@ l2fwd_main_loop(void)
 	int sent;
 	unsigned lcore_id;
 	uint64_t prev_tsc, diff_tsc, cur_tsc, timer_tsc;
+	uint64_t start_tsc, term_tsc;
 	unsigned i, j, portid, nb_rx;
 	struct lcore_queue_conf *qconf;
 	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S *
@@ -232,10 +237,19 @@ l2fwd_main_loop(void)
 
 	}
 
+	start_tsc = rte_rdtsc();
+	term_tsc = (g_seconds > 0) ? (start_tsc + (uint64_t)g_seconds * rte_get_tsc_hz()) : 0;
 	while (!force_quit) {
 
 		/* Drains TX queue in its main loop. 8< */
 		cur_tsc = rte_rdtsc();
+
+		if (unlikely(term_tsc > 0 && cur_tsc > term_tsc)) {
+			printf("\nLcore %u: Reached runtime limit of %u seconds. Exiting...\n", 
+					lcore_id, g_seconds);
+			force_quit = true;
+			break;
+		}
 
 		/*
 		 * TX burst queue drain
@@ -255,22 +269,22 @@ l2fwd_main_loop(void)
 			}
 
 			/* if timer is enabled */
-			if (timer_period > 0) {
+			// if (timer_period > 0) {
 
-				/* advance the timer */
-				timer_tsc += diff_tsc;
+			// 	/* advance the timer */
+			// 	timer_tsc += diff_tsc;
 
-				/* if timer has reached its timeout */
-				if (unlikely(timer_tsc >= timer_period)) {
+			// 	/* if timer has reached its timeout */
+			// 	if (unlikely(timer_tsc >= timer_period)) {
 
-					/* do this only on main core */
-					if (lcore_id == rte_get_main_lcore()) {
-						print_stats();
-						/* reset the timer */
-						timer_tsc = 0;
-					}
-				}
-			}
+			// 		/* do this only on main core */
+			// 		if (lcore_id == rte_get_main_lcore()) {
+			// 			print_stats();
+			// 			/* reset the timer */
+			// 			timer_tsc = 0;
+			// 		}
+			// 	}
+			// }
 
 			prev_tsc = cur_tsc;
 		}
@@ -296,6 +310,9 @@ l2fwd_main_loop(void)
 		}
 		/* >8 End of read packet from RX queues. */
 	}
+	if (lcore_id == rte_get_main_lcore()) {
+		print_stats();
+	}
 }
 
 static int
@@ -319,7 +336,8 @@ l2fwd_usage(const char *prgname)
 	       "       - The source MAC address is replaced by the TX port MAC address\n"
 	       "       - The destination MAC address is replaced by 02:00:00:00:00:TX_PORT_ID\n"
 	       "  --portmap: Configure forwarding port pair mapping\n"
-	       "	      Default: alternate port pairs\n\n",
+	       "	      Default: alternate port pairs\n"
+				 "  --seconds N: set a global variable to N seconds\n\n",
 	       prgname);
 }
 
@@ -426,6 +444,19 @@ l2fwd_parse_timer_period(const char *q_arg)
 	return n;
 }
 
+static int
+l2fwd_parse_seconds(const char *q_arg)
+{
+	char *end = NULL;
+	unsigned long n;
+
+	n = strtoul(q_arg, &end, 10);
+	if ((q_arg[0] == '\0') || (end == NULL) || (*end != '\0'))
+		return -1;
+
+	return n;
+}
+
 static const char short_options[] =
 	"p:"  /* portmask */
 	"P"   /* promiscuous */
@@ -435,6 +466,7 @@ static const char short_options[] =
 
 #define CMD_LINE_OPT_NO_MAC_UPDATING "no-mac-updating"
 #define CMD_LINE_OPT_PORTMAP_CONFIG "portmap"
+#define CMD_LINE_OPT_SECONDS "seconds"
 
 enum {
 	/* long options mapped to a short option */
@@ -443,12 +475,14 @@ enum {
 	 * conflict with short options */
 	CMD_LINE_OPT_NO_MAC_UPDATING_NUM = 256,
 	CMD_LINE_OPT_PORTMAP_NUM,
+	CMD_LINE_OPT_SECONDS_NUM,
 };
 
 static const struct option lgopts[] = {
 	{ CMD_LINE_OPT_NO_MAC_UPDATING, no_argument, 0,
 		CMD_LINE_OPT_NO_MAC_UPDATING_NUM},
 	{ CMD_LINE_OPT_PORTMAP_CONFIG, 1, 0, CMD_LINE_OPT_PORTMAP_NUM},
+	{ CMD_LINE_OPT_SECONDS, 1, 0, CMD_LINE_OPT_SECONDS_NUM},
 	{NULL, 0, 0, 0}
 };
 
@@ -514,6 +548,16 @@ l2fwd_parse_args(int argc, char **argv)
 
 		case CMD_LINE_OPT_NO_MAC_UPDATING_NUM:
 			mac_updating = 0;
+			break;
+
+		case CMD_LINE_OPT_SECONDS_NUM:
+			ret = l2fwd_parse_seconds(optarg);
+			if (ret < 0) {
+				printf("invalid seconds value\n");
+				l2fwd_usage(prgname);
+				return -1;
+			}
+			g_seconds = (uint32_t)ret;
 			break;
 
 		default:
@@ -677,6 +721,7 @@ main(int argc, char **argv)
 	/* >8 End of init EAL. */
 
 	printf("MAC updating %s\n", mac_updating ? "enabled" : "disabled");
+	printf("Global seconds set to: %u\n", g_seconds);
 
 	/* convert to number of cycles */
 	timer_period *= rte_get_timer_hz();
