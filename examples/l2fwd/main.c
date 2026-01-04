@@ -765,7 +765,7 @@ main(int argc, char **argv)
 	}
 
 	nb_mbufs = RTE_MAX(nb_ports * (nb_rxd + nb_txd + MAX_PKT_BURST +
-		nb_lcores * MEMPOOL_CACHE_SIZE), 8192U);
+		nb_lcores * MEMPOOL_CACHE_SIZE), 4096U);
 
 	/* Create the mbuf pool. 8< */
 	l2fwd_pktmbuf_pool = rte_pktmbuf_pool_create("mbuf_pool", nb_mbufs,
