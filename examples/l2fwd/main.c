@@ -38,6 +38,10 @@
 #include <rte_mbuf.h>
 #include <rte_string_fns.h>
 
+#ifdef RTE_ENABLE_DBCHECKER
+    #include <rte_dbchecker.h>
+#endif
+
 static volatile bool force_quit;
 
 static uint64_t g_seconds = 0;
@@ -194,6 +198,12 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 		l2fwd_mac_updating(m, dst_port);
 
 	buffer = tx_buffer[dst_port];
+	#ifdef RTE_ENABLE_DBCHECKER
+		dbchecker_free_mtdt_hook(m);
+		rte_mb();
+		dbchecker_alloc_mtdt_hook(m, DMA_TO_DEVICE);
+	#endif
+	rte_mb();
 	sent = rte_eth_tx_buffer(dst_port, 0, buffer, m);
 	if (sent)
 		port_statistics[dst_port].tx += sent;
@@ -312,6 +322,9 @@ l2fwd_main_loop(void)
 	}
 	if (lcore_id == rte_get_main_lcore()) {
 		print_stats();
+		#ifdef RTE_ENABLE_DBCHECKER
+			dbchecker_err_handler();
+		#endif
 	}
 }
 

@@ -955,7 +955,7 @@ eth_igb_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 
 		rxm = rxe->mbuf;
 		rxe->mbuf = nmb;
-		// if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(nmb, DMA_FROM_DEVICE);
+		if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(nmb, DMA_FROM_DEVICE);
 		dma_addr =
 			rte_cpu_to_le_64(rte_mbuf_data_iova_default(nmb));
 		rxdp->read.hdr_addr = 0;
@@ -2315,7 +2315,7 @@ igb_alloc_rx_queue_mbufs(struct igb_rx_queue *rxq)
 		rxd->read.hdr_addr = 0;
 		rxd->read.pkt_addr = dma_addr;
 		rxe[i].mbuf = mbuf;
-		// if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(mbuf, DMA_FROM_DEVICE);
+		if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(mbuf, DMA_FROM_DEVICE);
 	}
 
 	return 0;

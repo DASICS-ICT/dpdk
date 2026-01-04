@@ -271,7 +271,7 @@ int dbchecker_err_handler(void){
             (unsigned long)dbte_table[info].v,
             (unsigned long)dbte_table[info].wr);
         uio_write32(DBCHECKER_CLR_ERR_OFFSET, 0x1UL); // clear error
-        return -1;
+        rte_exit( EXIT_FAILURE, "DBCHECKER: error detected!\n");
     }
     return 0;
 }
