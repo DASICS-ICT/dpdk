@@ -38,6 +38,11 @@
 #include <rte_mbuf.h>
 #include <rte_string_fns.h>
 
+#ifdef RTE_ENABLE_DBCHECKER
+    #include <rte_dbchecker.h>
+#endif
+#define DEV_ID 0x0U
+
 static volatile bool force_quit;
 
 static uint64_t g_seconds = 0;
@@ -194,6 +199,12 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 		l2fwd_mac_updating(m, dst_port);
 
 	buffer = tx_buffer[dst_port];
+	#ifdef RTE_ENABLE_DBCHECKER
+		dbchecker_deactivate_mtdt_hook(m);
+		rte_mb();
+		dbchecker_activate_mtdt_hook(m, DMA_TO_DEVICE, DEV_ID);
+	#endif
+	rte_mb();
 	sent = rte_eth_tx_buffer(dst_port, 0, buffer, m);
 	if (sent)
 		port_statistics[dst_port].tx += sent;
@@ -312,6 +323,9 @@ l2fwd_main_loop(void)
 	}
 	if (lcore_id == rte_get_main_lcore()) {
 		print_stats();
+		#ifdef RTE_ENABLE_DBCHECKER
+			dbchecker_err_handler();
+		#endif
 	}
 }
 
@@ -917,6 +931,11 @@ main(int argc, char **argv)
 		if (ret < 0)
 			printf("Port %u, Failed to disable Ptype parsing\n",
 					portid);
+
+		// flow ctrl
+		struct rte_eth_fc_conf fc_conf;
+		int ret;
+
 		/* Start device */
 		ret = rte_eth_dev_start(portid);
 		if (ret < 0)
