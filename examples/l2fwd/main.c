@@ -53,6 +53,9 @@ static int mac_updating = 1;
 /* Ports set in promiscuous mode off by default. */
 static int promiscuous_on;
 
+/* User provided mbufs count */
+static unsigned int total_mbufs_param = 0;
+
 #define RTE_LOGTYPE_L2FWD RTE_LOGTYPE_USER1
 
 #define MAX_PKT_BURST 32
@@ -351,7 +354,8 @@ l2fwd_usage(const char *prgname)
 	       "       - The destination MAC address is replaced by 02:00:00:00:00:TX_PORT_ID\n"
 	       "  --portmap: Configure forwarding port pair mapping\n"
 	       "	      Default: alternate port pairs\n"
-				 "  --seconds N: set a global variable to N seconds\n\n",
+				 "  --seconds N: set a global variable to N seconds\n"
+				 "  --mbufs N: set the number of mbufs (default: calculated based on ports/queues)\n\n",
 	       prgname);
 }
 
@@ -471,6 +475,21 @@ l2fwd_parse_seconds(const char *q_arg)
 	return n;
 }
 
+static int
+l2fwd_parse_mbufs_value(const char *q_arg)
+{
+	char *end = NULL;
+	unsigned long n;
+
+	n = strtoul(q_arg, &end, 10);
+	if ((q_arg[0] == '\0') || (end == NULL) || (*end != '\0'))
+		return -1;
+	if (n == 0)
+		return -1;
+
+	return n;
+}
+
 static const char short_options[] =
 	"p:"  /* portmask */
 	"P"   /* promiscuous */
@@ -481,6 +500,7 @@ static const char short_options[] =
 #define CMD_LINE_OPT_NO_MAC_UPDATING "no-mac-updating"
 #define CMD_LINE_OPT_PORTMAP_CONFIG "portmap"
 #define CMD_LINE_OPT_SECONDS "seconds"
+#define CMD_LINE_OPT_MBUFS "mbufs"
 
 enum {
 	/* long options mapped to a short option */
@@ -490,6 +510,7 @@ enum {
 	CMD_LINE_OPT_NO_MAC_UPDATING_NUM = 256,
 	CMD_LINE_OPT_PORTMAP_NUM,
 	CMD_LINE_OPT_SECONDS_NUM,
+	CMD_LINE_OPT_MBUFS_NUM,
 };
 
 static const struct option lgopts[] = {
@@ -497,6 +518,7 @@ static const struct option lgopts[] = {
 		CMD_LINE_OPT_NO_MAC_UPDATING_NUM},
 	{ CMD_LINE_OPT_PORTMAP_CONFIG, 1, 0, CMD_LINE_OPT_PORTMAP_NUM},
 	{ CMD_LINE_OPT_SECONDS, 1, 0, CMD_LINE_OPT_SECONDS_NUM},
+	{ CMD_LINE_OPT_MBUFS, 1, 0, CMD_LINE_OPT_MBUFS_NUM},
 	{NULL, 0, 0, 0}
 };
 
@@ -572,6 +594,16 @@ l2fwd_parse_args(int argc, char **argv)
 				return -1;
 			}
 			g_seconds = (uint32_t)ret;
+			break;
+
+		case CMD_LINE_OPT_MBUFS_NUM:
+			ret = l2fwd_parse_mbufs_value(optarg);
+			if (ret < 0) {
+				printf("invalid mbufs value\n");
+				l2fwd_usage(prgname);
+				return -1;
+			}
+			total_mbufs_param = (unsigned int)ret;
 			break;
 
 		default:
@@ -825,6 +857,12 @@ main(int argc, char **argv)
 
 	nb_mbufs = RTE_MAX(nb_ports * (nb_rxd + nb_txd + MAX_PKT_BURST +
 		nb_lcores * MEMPOOL_CACHE_SIZE), 8192U);
+	
+	if (total_mbufs_param > nb_mbufs) {
+		printf("User provided mbufs (%u) > calculated mbufs (%u). Using user provided value.\n", 
+			total_mbufs_param, nb_mbufs);
+		nb_mbufs = total_mbufs_param;
+	}
 
 	/* Create the mbuf pool. 8< */
 	l2fwd_pktmbuf_pool = rte_pktmbuf_pool_create("mbuf_pool", nb_mbufs,
