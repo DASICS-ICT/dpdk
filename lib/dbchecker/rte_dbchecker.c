@@ -261,10 +261,13 @@ int dbchecker_err_handler(void){
     uint32_t addr_lo = uio_read32(DBCHECKER_ERR_ADDR_LO_OFFSET);
     uint32_t addr_hi = uio_read32(DBCHECKER_ERR_ADDR_HI_OFFSET);
     uint64_t addr = ((uint64_t)addr_hi << 32) | addr_lo;
+    uint16_t index =  (uint16_t)((addr >> 48) & 0xFFFFUL);
     if (cnt & ~0xF){
         fprintf(stderr, "DBCHECKER: error detected!\n");
-        fprintf(stderr, "DBCHECKER: error count: 0x%llx, info: 0x%llx, mtdt: 0x%llx\n",
+        fprintf(stderr, "DBCHECKER: error count: 0x%llx, info: 0x%llx, addr: 0x%llx\n",
             (unsigned long long)cnt, (unsigned long long)info, (unsigned long long)addr);
+        fprintf(stderr, "DBCHECKER: error mtdt raw0 : 0x%llx, raw1: 0x%llx\n",
+         (unsigned long long)dbte_table[index].raw0, (unsigned long long)dbte_table[index].raw1);
         // err cnt format:| cnt3(7) | cnt2(7) | cnt1(7) | cnt0(7) | latest err(4) |
         // cnt0: cross boundary violation
         // cnt1: write-read violation
@@ -280,6 +283,7 @@ int dbchecker_err_handler(void){
             .v   = 1
         };
         dbchecker_command(err_cmd.raw);
+        return -1;
     }
     return 0;
 }
@@ -300,6 +304,8 @@ int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir, uint16
         mtdt.dev_id = dev_id;
         mtdt.v = 1;
         dbte_table[index].raw1 = mtdt.raw1;
+        // printf(" DBCHECKER: activate addr: 0x%llx, index %x, wr %x, dev_id %x raw1 %llx raw0 %llx\n",
+        //     (unsigned long long)addr, index, mtdt.wr, mtdt.dev_id, mtdt.raw1, mtdt.raw0);
     #endif
     return 0;
 }
@@ -323,7 +329,7 @@ int dbchecker_deactivate_mtdt(dma_addr_t addr){
         mtdt.raw1 = dbte_table[index].raw1;
         mtdt.v = 0;
         dbte_table[index].raw1 = mtdt.raw1;
-        //printf("mtdt index %x valid %llx\n", index, (unsigned long long)dbte_table[index].v);
+        // printf("deactivate mtdt index %x valid %llx\n", index, (unsigned long long)dbte_table[index].v);
         rte_wmb();
         dbchecker_cmd_u free_cmd = {
             .imm = index,
