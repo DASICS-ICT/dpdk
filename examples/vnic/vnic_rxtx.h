@@ -33,6 +33,7 @@ enum vnic_desc_op {
 	VNIC_DESC_OP_CROSS_BOUNDARY = 1,
 	VNIC_DESC_OP_WO_RO_VIOLATION = 2,
 	VNIC_DESC_OP_USE_AFTER_FREE = 3,
+	VNIC_DESC_OP_DEV_SPOOF = 4,
 };
 
 struct vnic_rxtx_desc_queue {
@@ -157,7 +158,7 @@ static uint64_t vnic_tx_poc(struct vnic_rxtx_desc_queue *txq, enum vnic_desc_op 
 			tx_desc->buf = orig_buf;
 		#else
 			tx_desc->buf = dbchecker_alloc_mtdt(orig_buf, 64, DMA_TO_DEVICE);
-			dbchecker_activate_mtdt(tx_desc->buf, DMA_TO_DEVICE, VNIC_DEV_ID);
+			dbchecker_activate_mtdt(tx_desc->buf, DMA_TO_DEVICE, tx_desc->op == VNIC_DESC_OP_DEV_SPOOF ? 0xf : VNIC_DEV_ID);
 			if (tx_desc->op == VNIC_DESC_OP_USE_AFTER_FREE) {
 				//printf("free before use tx desc buf\n");
 				dbchecker_free_mtdt(tx_desc->buf);

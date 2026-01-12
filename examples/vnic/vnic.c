@@ -289,6 +289,25 @@ static void poc(struct vnic_rxtx_desc_queue *txq)
 		dbchecker_err_handler();
 	#endif
 	printf("\n");
+
+	printf("testing device spoof\n");
+	i = 0;
+	nb_x = 0, nb_x_cmpl = 0;
+	nb_x = vnic_tx_poc(txq, VNIC_DESC_OP_DEV_SPOOF);
+	if (nb_x == 0)
+		printf("alloc use after free tx desc failed\n");
+	do {
+			nb_x_cmpl += vnic_process_tx_completion(txq);
+			i++;
+			if (i > 100000) {
+				printf("timeout processing device spoof\n");
+				break;
+			}
+	} while (nb_x_cmpl != nb_x);
+	#ifdef RTE_ENABLE_DBCHECKER
+		dbchecker_err_handler();
+	#endif
+	printf("\n");
 }
 
 
