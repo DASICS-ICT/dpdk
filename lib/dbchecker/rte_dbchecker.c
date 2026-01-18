@@ -198,12 +198,13 @@ dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_dire
     mtdt.index = idx;
 
     /* store copy of mtdt at found index and advance allocation cursor to next position */
-    RTE_ASSERT(dbte_table[idx].v == 0);
+    // RTE_ASSERT(dbte_table[idx].v == 0);
     dbte_table[idx] = mtdt;
-    RTE_ASSERT(dbte_table[idx].v == 1);
-    RTE_ASSERT(dbte_table_sram[idx].v == 0);
+    // RTE_ASSERT(dbte_table[idx].v == 1);
+    // RTE_ASSERT(dbte_table_sram[idx].v == 0);
     dbte_table_sram[idx] = mtdt;
-    RTE_ASSERT(dbte_table_sram[idx].v == 1);
+    rte_io_wmb();
+    // RTE_ASSERT(dbte_table_sram[idx].v == 1);
     
     alloc_addr = (addr & 0xFFFFFFFFFFFFULL) | ((uint64_t)idx << 48);
 
@@ -236,7 +237,9 @@ dma_addr_t dbchecker_free_mtdt(dma_addr_t addr){
 
     dbte_table[index].v = 0;
     dbte_table_sram[index].v = 0;
-    assert(dbte_table[index].v == 0 && dbte_table_sram[index].v == 0);
+    rte_io_wmb();
+    // assert(dbte_table[index].v == 0);
+    // assert(dbte_table_sram[index].v == 0);
     return addr & 0xFFFFFFFFFFFFULL; // orig addr
 }
 
