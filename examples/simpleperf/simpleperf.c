@@ -54,9 +54,9 @@ struct onoff_profile {
 };
 
 struct token_bucket {
-    double tokens;
-    double rate_per_tsc; /* tokens (packets) per TSC */
-    double capacity;
+    double tokens;       /* bytes currently available */
+    double bytes_per_tsc;/* bytes generated per TSC */
+    double capacity;     /* max bucket size in bytes */
     uint64_t last_tsc;
 };
 
@@ -71,7 +71,7 @@ static int g_have_dst_mac = 0;
 static uint32_t g_num_mbufs = DEFAULT_NUM_MBUFS; 
 static uint64_t g_activate_cpu_time = 0;
 static enum traffic_profile g_profile = PROFILE_CONST;
-static double g_rate_pps = 0.0; /* 0 => unlimited */
+static double g_rate_bps = 0.0; /* byte-based rate limit (B/s), 0 => unlimited */
 static struct size_profile g_size_prof = {0, DEFAULT_PKT_SIZE, DEFAULT_PKT_SIZE, 0.0};
 static struct onoff_profile g_onoff = {0, 0, 1, 0};
 static uint32_t g_seed = 1;
@@ -96,11 +96,11 @@ static struct rte_mempool *g_mp = NULL; /* global mempool for main core */
 static void usage(const char *prg)
 {
     printf("Usage: %s [EAL args] -- [--tx|--rx] [--port N] [--queue Q] [--burst B] [--size S] [--seconds T] [--mbufs N]\n", prg);
-    printf("        [--dst-mac xx:xx:xx:xx:xx:xx] [--profile const|poisson|onoff] [--rate-pps N]\n");
+    printf("        [--dst-mac xx:xx:xx:xx:xx:xx] [--profile const|poisson|onoff] [--rate-bps N]\n");
     printf("        [--size-bimodal small,big,prob] [--onoff on_ms,off_ms] [--seed N]\n");
     printf("  --mbufs N: Set number of mbufs (range: 4096-65536, default: %d)\n", DEFAULT_NUM_MBUFS);
     printf("  --profile: Traffic pattern. const (default), poisson (random IAT), onoff (burst/silent)\n");
-    printf("  --rate-pps: Target packets per second (0=unlimited)\n");
+    printf("  --rate-bps: Target bytes per second (0=unlimited)\n");
     printf("  --size-bimodal: Enable two-size mix, e.g. 64,1500,0.3 (30%% large)\n");
     printf("  --onoff: On/off durations in ms, e.g. 200,100\n");
     printf("  --seed: RNG seed for reproducibility\n");
@@ -141,18 +141,19 @@ static inline uint64_t sample_exp_cycles(double lambda, double tsc_hz)
     return (uint64_t)(iat * tsc_hz);
 }
 
-static inline void tb_init(struct token_bucket *tb, double rate_pps, double tsc_hz)
+static inline void tb_init(struct token_bucket *tb, double rate_bps, double tsc_hz)
 {
-    tb->tokens = rate_pps;
-    tb->capacity = rate_pps; /* allow burst of ~1s worth of tokens */
-    tb->rate_per_tsc = rate_pps / tsc_hz;
+    double rate_Bps = rate_bps; /* bytes per second */
+    tb->tokens = rate_Bps;
+    tb->capacity = rate_Bps; /* allow burst of ~1s worth of traffic */
+    tb->bytes_per_tsc = rate_Bps / tsc_hz;
     tb->last_tsc = rte_rdtsc();
 }
 
 static inline void tb_refill(struct token_bucket *tb, uint64_t now)
 {
     uint64_t dt = now - tb->last_tsc;
-    double add = dt * tb->rate_per_tsc;
+    double add = dt * tb->bytes_per_tsc;
     tb->tokens = tb->tokens + add;
     if (tb->tokens > tb->capacity) tb->tokens = tb->capacity;
     tb->last_tsc = now;
@@ -160,7 +161,7 @@ static inline void tb_refill(struct token_bucket *tb, uint64_t now)
 
 static inline void tb_wait(struct token_bucket *tb, double need_tokens)
 {
-    if (tb->rate_per_tsc <= 0.0) return;
+    if (tb->bytes_per_tsc <= 0.0) return;
     uint64_t now = rte_rdtsc();
     tb_refill(tb, now);
     while (tb->tokens < need_tokens) {
@@ -179,6 +180,19 @@ static uint32_t pick_pkt_size(void)
     if (u < g_size_prof.prob_big)
         return g_size_prof.big_sz;
     return g_size_prof.small_sz;
+}
+
+static inline double expected_frame_len(void)
+{
+    /* include min Ethernet frame length of 64B (no preamble/IFG accounted) */
+    if (!g_size_prof.bimodal_enabled) {
+        uint32_t len = g_pkt_size < 64 ? 64 : g_pkt_size;
+        return (double)len;
+    }
+
+    double small = (double)(g_size_prof.small_sz < 64 ? 64 : g_size_prof.small_sz);
+    double big = (double)(g_size_prof.big_sz < 64 ? 64 : g_size_prof.big_sz);
+    return small * (1.0 - g_size_prof.prob_big) + big * g_size_prof.prob_big;
 }
 
 static int parse_mac(const char *s, struct rte_ether_addr *mac)
@@ -215,9 +229,9 @@ static void parse_app_args(int argc, char **argv)
             else if (strcmp(p, "onoff") == 0) g_profile = PROFILE_ONOFF;
             else rte_exit(EXIT_FAILURE, "Invalid profile: %s\n", p);
         }
-        else if (strcmp(argv[i], "--rate-pps") == 0 && i + 1 < argc) {
-            g_rate_pps = atof(argv[++i]);
-            if (g_rate_pps < 0.0) g_rate_pps = 0.0;
+        else if (strcmp(argv[i], "--rate-bps") == 0 && i + 1 < argc) {
+            g_rate_bps = atof(argv[++i]);
+            if (g_rate_bps < 0.0) g_rate_bps = 0.0;
         }
         else if (strcmp(argv[i], "--size-bimodal") == 0 && i + 1 < argc) {
             const char *s = argv[++i];
@@ -325,24 +339,27 @@ static int tx_worker(void *arg)
     struct rte_mbuf *bufs[512];
     struct rte_mbuf *bad_bufs[512];
     uint32_t burst = g_burst > 512 ? 512 : g_burst;
-    int force_single = (g_profile != PROFILE_CONST && g_rate_pps > 0.0);
-    if (force_single)
-        burst = 1; /* precise pacing when rate-controlled */
 
     double tsc_hz = (double)rte_get_tsc_hz();
     uint64_t deadline = 0;
     int rv = 0;
     struct token_bucket tb = {0};
-    if (g_rate_pps > 0.0 && g_profile == PROFILE_CONST)
-        tb_init(&tb, g_rate_pps, tsc_hz);
+    if (g_profile == PROFILE_CONST && g_rate_bps > 0.0)
+        tb_init(&tb, g_rate_bps, tsc_hz);
 
     uint64_t t = rte_rdtsc();
     if (g_start_tsc == 0) g_start_tsc = t;
     deadline = g_start_tsc + (uint64_t)g_seconds * (uint64_t)tsc_hz;
 
     uint64_t next_event_tsc = g_start_tsc;
-    if (g_profile == PROFILE_POISSON && g_rate_pps > 0.0)
-        next_event_tsc = g_start_tsc + sample_exp_cycles(g_rate_pps, tsc_hz);
+    double lambda_pps = 0.0;
+    if (g_profile == PROFILE_POISSON && g_rate_bps > 0.0) {
+        double avg_len = expected_frame_len();
+        if (avg_len > 0.0)
+            lambda_pps = g_rate_bps / avg_len; /* convert B/s to pps using expected frame length */
+        if (lambda_pps > 0.0)
+            next_event_tsc = g_start_tsc + sample_exp_cycles(lambda_pps, tsc_hz);
+    }
 
     if (g_profile == PROFILE_ONOFF) {
         g_onoff.on = 1;
@@ -352,6 +369,7 @@ static int tx_worker(void *arg)
 
     while (!g_stop) {
         uint64_t now = rte_rdtsc();
+        uint32_t send_cnt = burst;
 
         /* on-off gating */
         if (g_profile == PROFILE_ONOFF && (g_onoff.on_cycles || g_onoff.off_cycles)) {
@@ -371,26 +389,34 @@ static int tx_worker(void *arg)
             }
         }
 
-        if (g_profile == PROFILE_POISSON && g_rate_pps > 0.0) {
+        if (g_profile == PROFILE_POISSON && lambda_pps > 0.0) {
             if (now < next_event_tsc) {
                 rte_pause();
                 if (now >= deadline) break;
                 continue;
             }
-            next_event_tsc = now + sample_exp_cycles(g_rate_pps, tsc_hz);
+            /* accumulate how many Poisson events have arrived; cap by burst */
+            uint32_t due = 0;
+            while (due < burst && now >= next_event_tsc) {
+                due++;
+                next_event_tsc += sample_exp_cycles(lambda_pps, tsc_hz);
+            }
+            if (due == 0) {
+                if (now >= deadline) break;
+                continue;
+            }
+            send_cnt = due;
         }
 
-        if (g_rate_pps > 0.0 && g_profile == PROFILE_CONST)
-            tb_wait(&tb, (double)burst);
-
         do {
-            rv = rte_pktmbuf_alloc_bulk(g_mp, bufs, burst);
+            rv = rte_pktmbuf_alloc_bulk(g_mp, bufs, send_cnt);
         } while (rv != 0 && !g_stop);
         if (rv != 0) break;
 
         uint32_t valid = 0;
         uint32_t bad = 0;
-        for (uint32_t i = 0; i < burst; i++) {
+        uint64_t batch_bytes = 0;
+        for (uint32_t i = 0; i < send_cnt; i++) {
             uint32_t pkt_sz = pick_pkt_size();
             uint32_t frame_len = pkt_sz < 64 ? 64 : pkt_sz;
             struct rte_mbuf *m = bufs[i];
@@ -401,12 +427,16 @@ static int tx_worker(void *arg)
             }
             rte_memcpy(pkt, g_eth_hdr_template, sizeof(struct rte_ether_hdr));
             bufs[valid++] = m;
+            batch_bytes += (uint64_t)frame_len;
         }
         if (bad > 0) rte_pktmbuf_free_bulk(bad_bufs, bad);
         if (valid == 0) {
             if (now >= deadline) break;
             continue;
         }
+
+        if (g_profile == PROFILE_CONST && g_rate_bps > 0.0)
+            tb_wait(&tb, (double)batch_bytes);
 
         #ifdef RTE_ENABLE_DBCHECKER
             #ifdef TEST_ACT_CPUTIME
