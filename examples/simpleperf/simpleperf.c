@@ -185,14 +185,15 @@ static uint32_t pick_pkt_size(void)
 static inline double expected_frame_len(void)
 {
     /* include min Ethernet frame length of 64B (no preamble/IFG accounted) */
+    /* return bits instead of bytes */
     if (!g_size_prof.bimodal_enabled) {
-        uint32_t len = g_pkt_size < 64 ? 64 : g_pkt_size;
+        uint32_t len = (g_pkt_size < 64 ? 64 : g_pkt_size) << 3;
         return (double)len;
     }
 
-    double small = (double)(g_size_prof.small_sz < 64 ? 64 : g_size_prof.small_sz);
-    double big = (double)(g_size_prof.big_sz < 64 ? 64 : g_size_prof.big_sz);
-    return small * (1.0 - g_size_prof.prob_big) + big * g_size_prof.prob_big;
+    double small = (double)((g_size_prof.small_sz < 64 ? 64 : g_size_prof.small_sz) << 3);
+    double big = (double)((g_size_prof.big_sz < 64 ? 64 : g_size_prof.big_sz) << 3);
+    return (double)(small * (1.0 - g_size_prof.prob_big) + big * g_size_prof.prob_big);
 }
 
 static int parse_mac(const char *s, struct rte_ether_addr *mac)
