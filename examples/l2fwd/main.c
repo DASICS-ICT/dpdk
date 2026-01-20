@@ -205,7 +205,7 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 	#ifdef RTE_ENABLE_DBCHECKER
 		dbchecker_deactivate_mtdt_hook(m);
 		rte_mb();
-		dbchecker_activate_mtdt_hook(m, DMA_TO_DEVICE, DEV_ID);
+		dbchecker_activate_mtdt_hook(m, DMA_TO_DEVICE, DEV_ID, false);
 	#endif
 	rte_mb();
 	sent = rte_eth_tx_buffer(dst_port, 0, buffer, m);

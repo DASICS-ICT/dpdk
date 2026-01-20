@@ -444,7 +444,7 @@ static int tx_worker(void *arg)
                 uint64_t start = rte_rdtsc();
             #endif
             for (uint16_t i = 0; i < valid; i++) {
-                dbchecker_activate_mtdt_hook(bufs[i], DMA_TO_DEVICE, DEV_ID);
+                dbchecker_activate_mtdt_hook(bufs[i], DMA_TO_DEVICE, DEV_ID, false);
             }
             #ifdef TEST_ACT_CPUTIME
                 g_activate_cpu_time += (rte_rdtsc() - start);

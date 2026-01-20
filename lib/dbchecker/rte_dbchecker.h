@@ -58,7 +58,8 @@ static const enum dbchecker_rw_mode dma_to_db_map[] = {
 //     uint64_t dev_id    : 5;
 //     uint64_t wr        : 2;
 //     uint64_t v         : 1;
-//     uint64_t reserved  : 20;
+//     uint64_t non_cached: 1;
+//     uint64_t reserved  : 19;
 //     uint64_t index_off : 4;
 // }__attribute__((packed));
 
@@ -73,7 +74,8 @@ typedef union {
         uint64_t dev_id    : 5;
         uint64_t wr        : 2;
         uint64_t v         : 1;
-        uint64_t reserved  : 20;
+        uint64_t non_cached: 1;
+        uint64_t reserved  : 19;
         uint64_t index_off : 4;
     } __attribute__((packed));
 
@@ -118,10 +120,10 @@ void dbchecker_en_set(uint32_t dev_mask);
 uint32_t dbchecker_en_get(void);
 dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir);
 dma_addr_t dbchecker_free_mtdt(dma_addr_t addr);
-int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir, uint16_t dev_id);
+int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir, uint16_t dev_id, bool is_non_cached);
 int dbchecker_deactivate_mtdt(dma_addr_t addr);
 void dbchecker_free_all_mtdt(void);
-int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir, uint16_t dev_id);
+int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir, uint16_t dev_id, bool is_non_cached);
 int dbchecker_deactivate_mtdt_hook(struct rte_mbuf *m);
 int dbchecker_err_handler(void);
 int dbchecker_module_init_hook(void);

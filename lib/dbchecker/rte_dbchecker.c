@@ -231,12 +231,15 @@ dma_addr_t dbchecker_free_mtdt(dma_addr_t addr){
 
     dbte_table[index].raw1 = mtdt.raw1;
     rte_wmb();
-    dbchecker_cmd_u free_cmd = {
-        .imm = index,
-        .op  = DBCHECKER_OP_FREE,
-        .v   = 1
-    };
-    dbchecker_command(free_cmd.raw);
+    if (!mtdt.non_cached){
+        dbchecker_cmd_u free_cmd = {
+            .imm = index,
+            .op  = DBCHECKER_OP_FREE,
+            .v   = 1
+        };
+        dbchecker_command(free_cmd.raw);
+    }
+
     // DBCHECKER_DEBUG_LOG("DBCHECKER: free addr: 0x%llx\n", (unsigned long long)addr);
     
     return addr & 0xFFFFFFFFFFFFULL; // orig addr
@@ -288,7 +291,7 @@ int dbchecker_err_handler(void){
     return 0;
 }
 
-int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir, uint16_t dev_id){
+int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir, uint16_t dev_id, bool is_non_cached){
     #ifndef TEST_DBTE_CACHE_HIT
         if (unlikely(!dbchecker_enable))
             return 0; // dbchecker not enabled
@@ -302,6 +305,7 @@ int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir, uint16
             mtdt.wr = DBCHECKER_RWMODE_INVALID;
         }
         mtdt.dev_id = dev_id;
+        mtdt.non_cached = is_non_cached ? 1 : 0;
         mtdt.v = 1;
         dbte_table[index].raw1 = mtdt.raw1;
         // printf(" DBCHECKER: activate addr: 0x%llx, index %x, wr %x, dev_id %x raw1 %llx raw0 %llx\n",
@@ -310,13 +314,13 @@ int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir, uint16
     return 0;
 }
 
-int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir, uint16_t dev_id){
+int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir, uint16_t dev_id, bool is_non_cached){
     if (!m)
         return -1;
     if (!RTE_MBUF_DIRECT(m))
         return -1;
     dma_addr_t base = (dma_addr_t)rte_mbuf_iova_get(m);
-    return dbchecker_activate_mtdt(base, dir, dev_id);
+    return dbchecker_activate_mtdt(base, dir, dev_id, is_non_cached);
 }
 
 int dbchecker_deactivate_mtdt(dma_addr_t addr){
@@ -331,13 +335,16 @@ int dbchecker_deactivate_mtdt(dma_addr_t addr){
         dbte_table[index].raw1 = mtdt.raw1;
         // printf("deactivate mtdt index %x valid %llx\n", index, (unsigned long long)dbte_table[index].v);
         rte_wmb();
-        dbchecker_cmd_u free_cmd = {
-            .imm = index,
-            .op  = DBCHECKER_OP_FREE,
-            .v   = 1
-        };
-        //printf("deactivate index %x\n", index);
-        return dbchecker_command(free_cmd.raw);
+        if (!mtdt.non_cached){
+            dbchecker_cmd_u free_cmd = {
+                .imm = index,
+                .op  = DBCHECKER_OP_FREE,
+                .v   = 1
+            };
+            //printf("deactivate index %x\n", index);
+            return dbchecker_command(free_cmd.raw);
+        }
+        else return 0;
     #else
         return 0;
     #endif
@@ -538,7 +545,7 @@ void dbchecker_dma_zone_alloc_hook(const struct rte_memzone *mz)
          * update the internal memzone descriptor. */
         struct rte_memzone *mz_nc = (struct rte_memzone *)(uintptr_t)mz;
         mz_nc->iova = (rte_iova_t)new_iova;
-        dbchecker_activate_mtdt(new_iova, DMA_BIDIRECTIONAL, 0x0U);
+        dbchecker_activate_mtdt(new_iova, DMA_BIDIRECTIONAL, 0x0U, false);
         DBCHECKER_DEBUG_LOG("dbchecker_dma_zone_alloc_hook: updated memzone '%s' iova 0x%llx -> 0x%llx\n",
             mz->name, (unsigned long long)base, (unsigned long long)new_iova);
     }
