@@ -2309,13 +2309,13 @@ igb_alloc_rx_queue_mbufs(struct igb_rx_queue *rxq)
 				     "queue_id=%hu", rxq->queue_id);
 			return -ENOMEM;
 		}
+		if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(mbuf, DMA_FROM_DEVICE);
 		dma_addr =
 			rte_cpu_to_le_64(rte_mbuf_data_iova_default(mbuf));
 		rxd = &rxq->rx_ring[i];
 		rxd->read.hdr_addr = 0;
 		rxd->read.pkt_addr = dma_addr;
 		rxe[i].mbuf = mbuf;
-		if (dbchecker_alloc_mtdt_hook) dbchecker_alloc_mtdt_hook(mbuf, DMA_FROM_DEVICE);
 	}
 
 	return 0;
