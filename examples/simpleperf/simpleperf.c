@@ -260,12 +260,12 @@ static int rx_worker(void *arg)
         }
 
         /* free received mbufs in bulk */
-        rte_pktmbuf_free_bulk(bufs, nb);
         #ifdef RTE_ENABLE_DBCHECKER
-            // for (i = 0; i < nb; i++) {
-            //     dbchecker_free_mtdt_hook(bufs[i]);
-            // }
+            for (i = 0; i < nb; i++) {
+                dbchecker_free_mtdt_hook(bufs[i]);
+            }
         #endif
+        rte_pktmbuf_free_bulk(bufs, nb);
         if (rte_rdtsc() >= deadline)
             break;
     }
