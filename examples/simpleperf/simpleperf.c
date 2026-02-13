@@ -1,9 +1,4 @@
-// simpleperf: DPDK-25 ethdev bandwidth tester
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-// simpleperf: DPDK-25 ethdev bandwidth tester (clean version)
+// simpleperf: DPDK-25 ethdev bandwidth tester (Modified for Rate/Profile/Bimodal)
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +6,8 @@
 #include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h> // Added for log()
+#include <time.h> // Added for srand
 
 #include <rte_eal.h>
 #include <rte_ethdev.h>
@@ -21,6 +18,7 @@
 #include <signal.h>
 #include <rte_atomic.h>
 #include <rte_ring.h>
+#include <rte_random.h> // For rte_rand
 
 #ifdef RTE_ENABLE_DBCHECKER
     #include <rte_dbchecker.h>
@@ -34,6 +32,14 @@
 #define DEFAULT_PKT_SIZE 64
 #define DEFAULT_SECONDS 3600
 #define MBUF_POOL_SIZE 512
+
+// New Globals for features
+static uint64_t g_rate_bps = 0; // 0 means unlimited
+static int g_profile_poisson = 0; // 0: CBR (default), 1: Poisson
+static int g_bimodal_enabled = 0;
+static uint32_t g_bimodal_min = 64;
+static uint32_t g_bimodal_max = 1518;
+static double g_bimodal_prob = 0.0;
 
 static uint16_t g_port_id = 0;
 static uint16_t g_queue_id = 0;
@@ -62,12 +68,15 @@ static volatile int g_worker_done = 0;
 static struct rte_mempool *g_mp = NULL; /* global mempool for main core */
 /* packet template prepared by main to minimize per-packet construction in tx_worker */
 static uint8_t *g_template = NULL;
-static uint32_t g_frame_len = 0;
+static uint32_t g_frame_len = 0; // Used as max length for allocation
 
 static void usage(const char *prg)
 {
     printf("Usage: %s [EAL args] -- [--tx|--rx] [--port N] [--queue Q] [--burst B] [--size S] [--seconds T] [--mbufs N] [--dst-mac xx:xx:xx:xx:xx:xx]\n", prg);
     printf("  --mbufs N: Set number of mbufs (range: 4096-65536, default: %d)\n", DEFAULT_NUM_MBUFS);
+    printf("  --rate-bps N: Limit TX rate to N bits per second (default: unlimited)\n");
+    printf("  --profile poisson: Use Poisson inter-arrival times (requires --rate-bps)\n");
+    printf("  --size-bimodal min,max,prob: Use bimodal packet size (e.g., 64,1460,0.5)\n");
 }
 
 static volatile sig_atomic_t g_stop;
@@ -110,6 +119,28 @@ static void parse_app_args(int argc, char **argv)
             if (parse_mac(argv[++i], &g_dst_mac) == 0)
                 g_have_dst_mac = 1;
         }
+        // New Arguments
+        else if (strcmp(argv[i], "--rate-bps") == 0 && i + 1 < argc) {
+            g_rate_bps = strtoull(argv[++i], NULL, 10);
+        }
+        else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
+            const char *prof = argv[++i];
+            if (strcmp(prof, "poisson") == 0) {
+                g_profile_poisson = 1;
+            } else {
+                rte_exit(EXIT_FAILURE, "Unknown profile: %s\n", prof);
+            }
+        }
+        else if (strcmp(argv[i], "--size-bimodal") == 0 && i + 1 < argc) {
+            const char *arg = argv[++i];
+            if (sscanf(arg, "%u,%u,%lf", &g_bimodal_min, &g_bimodal_max, &g_bimodal_prob) != 3) {
+                rte_exit(EXIT_FAILURE, "Invalid bimodal format. Expected: min,max,prob\n");
+            }
+            g_bimodal_enabled = 1;
+            // Ensure min/max are valid ethernet sizes (roughly)
+            if (g_bimodal_min < 60) g_bimodal_min = 60;
+            if (g_bimodal_max > 9000) g_bimodal_max = 9000; 
+        }
         else {
             usage(argv[0]);
             rte_exit(EXIT_FAILURE, "Invalid argument: %s\n", argv[i]);
@@ -139,7 +170,10 @@ static void print_stats(uint16_t port, struct perf_stats *s)
     printf("Activate CPU Time: %.6f s\n", (double)g_activate_cpu_time / hz);
     printf("Bandwidth:     %.3f Mbps\n", mbps);
     printf("Throughput:    %.2f pkt/s\n", pps);
-    printf("Pkt size:      %u bytes\n", g_pkt_size);
+    if (g_bimodal_enabled)
+        printf("Pkt size:      Bimodal (%u, %u, %.2f)\n", g_bimodal_min, g_bimodal_max, g_bimodal_prob);
+    else
+        printf("Pkt size:      %u bytes\n", g_pkt_size);
     printf("============================\n");
 }
 
@@ -185,10 +219,30 @@ static int tx_worker(void *arg)
     int rv = 0;
     uint16_t i;
 
+    /* Rate limiting state */
+    uint64_t next_send_tsc = 0;
+    double cycles_per_bit = 0.0;
+    if (g_rate_bps > 0) {
+        cycles_per_bit = (double)tsc_hz / (double)g_rate_bps;
+    }
+    
+    /* Seed for drand48 if used for Poisson/Bimodal */
+    srand48(time(NULL));
+
     uint64_t t = rte_rdtsc();
     if (g_start_tsc == 0) g_start_tsc = t;
     deadline = g_start_tsc + (uint64_t)g_seconds * tsc_hz;
+    next_send_tsc = t;
+
     while (!g_stop) {
+        /* Rate Limiting Wait */
+        if (g_rate_bps > 0) {
+            while (rte_rdtsc() < next_send_tsc) {
+                if (g_stop) break;
+                rte_pause();
+            }
+        }
+
         rv = rte_pktmbuf_alloc_bulk(g_mp, bufs, burst);
         if (unlikely(rv != 0)) {
             rte_exit(EXIT_FAILURE, "tx_worker: rte_pktmbuf_alloc_bulk failed\n");
@@ -197,21 +251,38 @@ static int tx_worker(void *arg)
         /* fill payload from template; track any failure to append */
         uint32_t valid = 0;
         uint32_t bad = 0;
+        uint64_t burst_bytes = 0; // Track bytes for rate limiting
+
         do {
             for (uint32_t i = 0; i < burst; i++) {
                 struct rte_mbuf *m = bufs[i];
-                char *pkt = (char *)rte_pktmbuf_append(m, g_frame_len);
+                uint32_t current_len = g_pkt_size;
+
+                /* Bimodal Logic */
+                if (g_bimodal_enabled) {
+                    double r = drand48();
+                    if (r < g_bimodal_prob) current_len = g_bimodal_min;
+                    else current_len = g_bimodal_max;
+                }
+
+                char *pkt = (char *)rte_pktmbuf_append(m, current_len);
                 if (pkt == NULL) {
                     bad_bufs[bad++] = m;
                     continue;
                 }
                 /* copy prebuilt template (ethernet header + payload) */
-                rte_memcpy(pkt, g_template, g_frame_len);
+                /* Note: g_template is allocated to max possible size */
+                rte_memcpy(pkt, g_template, current_len);
                 bufs[valid++] = m;
+                
+                // Add Preamble(8) + IFG(12) + CRC(4) + Payload for physical wire bits
+                burst_bytes += (current_len + 24); 
             }
         } while (valid == 0);
+
         /* free any mbufs that failed to be appended */
         if (bad > 0) rte_pktmbuf_free_bulk(bad_bufs, bad);
+
         /* send as many as possible; tx_burst may return partial sends */
         #ifdef RTE_ENABLE_DBCHECKER
             #ifdef TEST_ACT_CPUTIME
@@ -229,6 +300,29 @@ static int tx_worker(void *arg)
             uint16_t n = rte_eth_tx_burst(g_port_id, g_queue_id, &bufs[sent], valid - sent);
             if (n == 0) continue;
             sent += n;
+        }
+
+        /* Update Rate Limiter */
+        if (g_rate_bps > 0) {
+            uint64_t bits_sent = burst_bytes * 8;
+            double delay_cycles = bits_sent * cycles_per_bit;
+
+            if (g_profile_poisson) {
+                /* Poisson: Interval = -ln(U) * Average_Interval */
+                /* We apply this to the burst gap. */
+                double u = drand48();
+                // Avoid log(0)
+                if (u < 1e-9) u = 1e-9;
+                delay_cycles = -log(u) * delay_cycles;
+            }
+
+            next_send_tsc += (uint64_t)delay_cycles;
+            
+            // Handle case where we fell too far behind (don't try to catch up infinitely)
+            uint64_t now = rte_rdtsc();
+            if (next_send_tsc < now) {
+                next_send_tsc = now;
+            }
         }
 
         if (rte_rdtsc() >= deadline)
@@ -331,8 +425,12 @@ int main(int argc, char **argv)
             printf("Port %u: link not up after %u seconds, continuing anyway\n", g_port_id, wait_secs);
     }
 
-    printf("Starting %s test on port %u queue %u burst=%u size=%u mbufs=%u s=%u... \n",
-        g_mode_tx ? "TX" : "RX", g_port_id, g_queue_id, g_burst, g_pkt_size, g_num_mbufs, g_seconds);
+    printf("Starting %s test on port %u queue %u burst=%u mbufs=%u s=%u... \n",
+        g_mode_tx ? "TX" : "RX", g_port_id, g_queue_id, g_burst, g_num_mbufs, g_seconds);
+    
+    if (g_rate_bps > 0) printf("Rate Limit: %" PRIu64 " bps (%s)\n", g_rate_bps, g_profile_poisson ? "Poisson" : "CBR");
+    if (g_bimodal_enabled) printf("Size: Bimodal %u/%u (prob %.2f)\n", g_bimodal_min, g_bimodal_max, g_bimodal_prob);
+    else printf("Size: Fixed %u\n", g_pkt_size);
 
     /* initialize shared counters (published by worker at end) */
     g_worker_done = 0;
@@ -345,7 +443,12 @@ int main(int argc, char **argv)
         /* prepare a template packet (ether header + zeroed payload) so
          * tx_worker can quickly memcpy it into newly allocated mbufs.
          */
-        g_frame_len = g_pkt_size < 64 ? 64 : g_pkt_size;
+        // ALLOCATE MAX SIZE to support bimodal
+        uint32_t max_size = g_pkt_size;
+        if (g_bimodal_enabled && g_bimodal_max > max_size) max_size = g_bimodal_max;
+        if (max_size < 64) max_size = 64;
+        
+        g_frame_len = max_size; // Used for allocation size
         g_template = malloc(g_frame_len);
         if (g_template == NULL) rte_exit(EXIT_FAILURE, "Failed to allocate template buffer\n");
         if (!g_have_dst_mac) memset(&g_dst_mac, 0xFF, sizeof(g_dst_mac));
