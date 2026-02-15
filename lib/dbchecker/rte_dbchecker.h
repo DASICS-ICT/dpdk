@@ -113,7 +113,7 @@ typedef union {
         } while (0)
 
 /* Public API */
-int dbchecker_init(const char *dev);
+int dbchecker_init(void);
 void dbchecker_exit(void);
 int dbchecker_command(uint32_t cmd);
 void dbchecker_en_set(uint32_t dev_mask);
@@ -132,5 +132,8 @@ void dbchecker_alloc_mtdt_hook(struct rte_mbuf *m);
 void dbchecker_free_mtdt_hook(struct rte_mbuf *m);
 void dbchecker_dma_zone_alloc_hook(const struct rte_memzone *mz);
 void dbchecker_dma_zone_free_hook(const struct rte_memzone *mz);
+dma_addr_t dbchecker_alloc_mtdt_generic(dma_addr_t addr, 
+    size_t size, enum dma_data_direction dir, uint16_t dev_id);
+dma_addr_t dbchecker_free_mtdt_generic(dma_addr_t addr);
 
 #endif /* LIB_DBCHECKER_DBCHECKER_H */

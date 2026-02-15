@@ -528,6 +528,10 @@ int main(int argc, char **argv)
     if (nb_ports == 0) rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
     if (g_port_id >= nb_ports) rte_exit(EXIT_FAILURE, "Invalid port id %u\n", g_port_id);
 
+    #ifdef RTE_ENABLE_DBCHECKER
+        dbchecker_module_init_hook();
+    #endif
+
     printf("Creating mbuf pool with %u mbufs...\n", g_num_mbufs);
     struct rte_mempool *mp = rte_pktmbuf_pool_create("MBUF_POOL", g_num_mbufs,
         MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
@@ -582,15 +586,16 @@ int main(int argc, char **argv)
         rx_worker(NULL);
     }
 
-#ifdef RTE_ENABLE_DBCHECKER
-    dbchecker_err_handler();
-#endif
     /* final summary print */
     struct perf_stats s = {0};
     s.start_tsc = g_start_tsc ? g_start_tsc : rte_rdtsc();
     s.end_tsc = g_end_tsc ? g_end_tsc : rte_rdtsc();
     printf("\n==== %s ETH stats port=%u ====\n", g_mode_tx ? "TX" : "RX", g_port_id);
     print_stats(g_port_id, &s);
+    #ifdef RTE_ENABLE_DBCHECKER
+        dbchecker_err_handler();
+        dbchecker_module_exit_hook();
+    #endif
     rte_eth_dev_stop(g_port_id);
     rte_eth_dev_close(g_port_id);
     rte_eal_cleanup();
