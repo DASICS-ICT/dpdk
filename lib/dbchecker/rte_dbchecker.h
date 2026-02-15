@@ -73,5 +73,8 @@ void dbchecker_alloc_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir);
 void dbchecker_free_mtdt_hook(struct rte_mbuf *m);
 void dbchecker_dma_zone_alloc_hook(const struct rte_memzone *mz);
 void dbchecker_dma_zone_free_hook(const struct rte_memzone *mz);
+dma_addr_t dbchecker_alloc_mtdt_generic(dma_addr_t addr, 
+    size_t size, enum dma_data_direction dir);
+dma_addr_t dbchecker_free_mtdt_generic(dma_addr_t addr);
 
 #endif /* LIB_DBCHECKER_DBCHECKER_H */

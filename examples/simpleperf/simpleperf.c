@@ -375,6 +375,10 @@ int main(int argc, char **argv)
     int ret = rte_eal_init(argc, argv);
     if (ret < 0) rte_exit(EXIT_FAILURE, "EAL init failed\n");
 
+    #ifdef RTE_ENABLE_DBCHECKER
+        dbchecker_module_init_hook();
+    #endif
+
     /* adjust argv/argc for app args */
     argc -= ret;
     argv += ret;
@@ -468,6 +472,7 @@ int main(int argc, char **argv)
 
 #ifdef RTE_ENABLE_DBCHECKER
     dbchecker_err_handler();
+    dbchecker_module_exit_hook();
 #endif
     /* final summary print */
     struct perf_stats s = {0};

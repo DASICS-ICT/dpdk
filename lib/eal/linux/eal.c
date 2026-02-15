@@ -63,8 +63,8 @@
  * only when dbchecker is linked in. Use consistent naming "hook"
  * to match other hook-like extension points in the codebase.
  */
-extern int dbchecker_module_init_hook(void) __attribute__((weak));
-extern void dbchecker_module_exit_hook(void) __attribute__((weak));
+// extern int dbchecker_module_init_hook(void) __attribute__((weak));
+// extern void dbchecker_module_exit_hook(void) __attribute__((weak));
 
 #define MEMSIZE_IF_NO_HUGE_PAGE (64ULL * 1024ULL * 1024ULL)
 
@@ -1297,8 +1297,8 @@ rte_eal_init(int argc, char **argv)
 	 * so check for presence before calling. This emulates kernel driver's
 	 * module init on EAL startup.
 	 */
-	if (dbchecker_module_init_hook)
-		(void)dbchecker_module_init_hook();
+	// if (dbchecker_module_init_hook)
+	// 	(void)dbchecker_module_init_hook();
 
 	return fctret;
 }
@@ -1363,8 +1363,8 @@ rte_eal_cleanup(void)
 	 * EAL shutdown. Do this before log cleanup so messages from dbchecker
 	 * can be emitted.
 	 */
-	if (dbchecker_module_exit_hook)
-		dbchecker_module_exit_hook();
+	// if (dbchecker_module_exit_hook)
+	// 	dbchecker_module_exit_hook();
 
 	rte_eal_log_cleanup();
 	return 0;

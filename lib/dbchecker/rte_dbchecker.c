@@ -520,6 +520,102 @@ void dbchecker_dma_zone_free_hook(const struct rte_memzone *mz)
         mz_nc->name, (unsigned long long)mz_nc->iova);
 }
 
+dma_addr_t dbchecker_alloc_mtdt_generic(dma_addr_t addr, size_t size, enum dma_data_direction dir){
+    //if (!(dbchecker_en_get() & 0xFFFFFFFF))
+    //    return addr; // not enabled
+    if (spdk_unlikely(dbchecker_enable == 0)) {
+		int rc = dbchecker_module_init_hook();
+		if (rc) {
+			printf("DBChecker init failed inside spdk_env_init\n");
+            rte_exit( EXIT_FAILURE, "DBChecker init failed inside spdk_env_init\n");
+		}
+    }
+    // use global flag to avoid mmio
+    assert(dbchecker_enable != 0);
+
+    struct dbchecker_mtdt mtdt;
+    memset(&mtdt, 0, sizeof(mtdt));
+    mtdt.wr = (dir == DMA_BIDIRECTIONAL) ? DBCHECKER_RWMODE_RW :
+         (dir == DMA_FROM_DEVICE) ? DBCHECKER_RWMODE_WO :
+         (dir == DMA_TO_DEVICE) ? DBCHECKER_RWMODE_RO :
+          DBCHECKER_RWMODE_INVALID;
+
+    dma_addr_t alloc_addr = (dma_addr_t)-1;
+    mtdt.lo_bnd = addr & 0xFFFFFFFFFFFFULL;
+    mtdt.up_bnd_lo = (uint16_t)((addr + size) & 0xFFFFULL);
+    mtdt.up_bnd_hi = (uint32_t)(((addr + size) >> 16) & 0xFFFFFFFFUL);
+
+    /* Find a free slot starting at current counter. The counter encodes
+     * [group:12 | offset:4] and increments group first then offset.
+     * If the current slot is occupied (v != 0), walk forward until a
+     * slot with v == 0 is found or we wrap back to start -> failure.
+     */
+    uint16_t start = dbte_alloc_id;
+    uint16_t idx = start;
+    bool found = false;
+    do {
+        if (dbte_table[idx].v == 0) {
+            found = true;
+            break;
+        }
+        idx = dbte_next_id(idx);
+    } while (idx != start);
+    
+    if (!found) {
+        printf("DBCHECKER: alloc failed, table full (start idx %u)\n", start);
+        rte_exit( EXIT_FAILURE, "DBCHECKER: alloc failed, table full\n");
+        return alloc_addr; /* -1 */
+    }
+    mtdt.v = 1;
+    mtdt.index = idx;
+
+    /* store copy of mtdt at found index and advance allocation cursor to next position */
+    // RTE_ASSERT(dbte_table[idx].v == 0);
+    dbte_table[idx] = mtdt;
+    // RTE_ASSERT(dbte_table[idx].v == 1);
+    // RTE_ASSERT(dbte_table_sram[idx].v == 0);
+    dbte_table_sram[idx] = mtdt;
+    spdk_wmb();
+    // RTE_ASSERT(dbte_table_sram[idx].v == 1);
+    
+    alloc_addr = (addr & 0xFFFFFFFFFFFFULL) | ((uint64_t)idx << 48);
+
+    dbte_alloc_id = dbte_next_id(idx);
+    // DBCHECKER_DEBUG_LOG("DBCHECKER: alloc addr: 0x%llx, save metadata idx %zu\n",
+    //     (unsigned long long)alloc_addr, idx);
+    // printf("DBCHECKER: alloc addr: 0x%llx, lo_bnd 0x%llx, up_bnd_hi 0x%llx, up_bnd_lo 0x%llx\n",
+    //      (unsigned long long)alloc_addr, (unsigned long long)mtdt.lo_bnd, 
+    //      (unsigned long long)mtdt.up_bnd_hi, (unsigned long long)mtdt.up_bnd_lo);
+    return alloc_addr;
+}
+
+
+dma_addr_t dbchecker_free_mtdt_generic(dma_addr_t addr){
+    //if (!(dbchecker_en_get() & 0xFFFFFFFF)) 
+    //    return addr; // dbchecker not enabled
+
+    // use global flag to avoid mmio
+    if (!dbchecker_enable)
+        return addr; // dbchecker not enabled
+
+    uint16_t index = (uint16_t)((addr >> 48) & 0xFFFUL);
+    //printf("dbchecker_free_mtdt index %x\n", index);
+
+    if (index >= MAX_DBTE_TABLE_SIZE) {
+        printf("DBCHECKER Error: free mtdt failed, index %u out of bounds (Max %u)\n", 
+           index, MAX_DBTE_TABLE_SIZE);
+        return (dma_addr_t)-1; 
+    }
+
+    dbte_table[index].v = 0;
+    dbte_table_sram[index].v = 0;
+    spdk_wmb();
+    // assert(dbte_table[index].v == 0);
+    // assert(dbte_table_sram[index].v == 0);
+    return addr & 0xFFFFFFFFFFFFULL; // orig addr
+}
+
+
 /* If this file is compiled into a library for DPDK user applications,
  * they can call dbchecker_init()/dbchecker_exit() to manage the device.
  */
