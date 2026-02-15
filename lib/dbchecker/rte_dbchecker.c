@@ -523,18 +523,8 @@ void dbchecker_dma_zone_free_hook(const struct rte_memzone *mz)
 dma_addr_t dbchecker_alloc_mtdt_generic(dma_addr_t addr, size_t size, enum dma_data_direction dir){
     //if (!(dbchecker_en_get() & 0xFFFFFFFF))
     //    return addr; // not enabled
-    if (spdk_unlikely(dbchecker_enable == 0)) {
-		int rc = dbchecker_module_init_hook();
-		if (rc) {
-			printf("DBChecker init failed inside spdk_env_init\n");
-            rte_exit( EXIT_FAILURE, "DBChecker init failed inside spdk_env_init\n");
-		}
-    }
-    // use global flag to avoid mmio
-    assert(dbchecker_enable != 0);
 
     struct dbchecker_mtdt mtdt;
-    memset(&mtdt, 0, sizeof(mtdt));
     mtdt.wr = (dir == DMA_BIDIRECTIONAL) ? DBCHECKER_RWMODE_RW :
          (dir == DMA_FROM_DEVICE) ? DBCHECKER_RWMODE_WO :
          (dir == DMA_TO_DEVICE) ? DBCHECKER_RWMODE_RO :
@@ -575,7 +565,7 @@ dma_addr_t dbchecker_alloc_mtdt_generic(dma_addr_t addr, size_t size, enum dma_d
     // RTE_ASSERT(dbte_table[idx].v == 1);
     // RTE_ASSERT(dbte_table_sram[idx].v == 0);
     dbte_table_sram[idx] = mtdt;
-    spdk_wmb();
+    rte_wmb();
     // RTE_ASSERT(dbte_table_sram[idx].v == 1);
     
     alloc_addr = (addr & 0xFFFFFFFFFFFFULL) | ((uint64_t)idx << 48);
@@ -609,7 +599,7 @@ dma_addr_t dbchecker_free_mtdt_generic(dma_addr_t addr){
 
     dbte_table[index].v = 0;
     dbte_table_sram[index].v = 0;
-    spdk_wmb();
+    rte_wmb();
     // assert(dbte_table[index].v == 0);
     // assert(dbte_table_sram[index].v == 0);
     return addr & 0xFFFFFFFFFFFFULL; // orig addr
