@@ -261,8 +261,8 @@ static int tx_worker(void *arg)
                 /* Bimodal Logic */
                 if (g_bimodal_enabled) {
                     double r = drand48();
-                    if (r < g_bimodal_prob) current_len = g_bimodal_min;
-                    else current_len = g_bimodal_max;
+                    if (r < g_bimodal_prob) current_len = g_bimodal_max;
+                    else current_len = g_bimodal_min;
                 }
 
                 char *pkt = (char *)rte_pktmbuf_append(m, current_len);
