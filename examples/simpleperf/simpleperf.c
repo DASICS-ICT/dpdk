@@ -592,12 +592,12 @@ int main(int argc, char **argv)
     s.end_tsc = g_end_tsc ? g_end_tsc : rte_rdtsc();
     printf("\n==== %s ETH stats port=%u ====\n", g_mode_tx ? "TX" : "RX", g_port_id);
     print_stats(g_port_id, &s);
+    rte_eth_dev_stop(g_port_id);
+    rte_eth_dev_close(g_port_id);
     #ifdef RTE_ENABLE_DBCHECKER
         dbchecker_err_handler();
         dbchecker_module_exit_hook();
     #endif
-    rte_eth_dev_stop(g_port_id);
-    rte_eth_dev_close(g_port_id);
     rte_eal_cleanup();
     return 0;
 }
