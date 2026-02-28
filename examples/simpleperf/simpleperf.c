@@ -470,10 +470,6 @@ int main(int argc, char **argv)
         rx_worker(NULL);
     }
 
-#ifdef RTE_ENABLE_DBCHECKER
-    dbchecker_err_handler();
-    dbchecker_module_exit_hook();
-#endif
     /* final summary print */
     struct perf_stats s = {0};
     s.start_tsc = g_start_tsc ? g_start_tsc : rte_rdtsc();
@@ -484,9 +480,14 @@ int main(int argc, char **argv)
         free(g_template);
         g_template = NULL;
     }
-    
+    #ifdef RTE_ENABLE_DBCHECKER
+        dbchecker_err_handler();
+    #endif
     rte_eth_dev_stop(g_port_id);
     rte_eth_dev_close(g_port_id);
     rte_eal_cleanup();
+    #ifdef RTE_ENABLE_DBCHECKER
+        dbchecker_module_exit_hook();
+    #endif
     return 0;
 }
