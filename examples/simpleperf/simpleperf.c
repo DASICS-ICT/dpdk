@@ -20,10 +20,6 @@
 #include <rte_atomic.h>
 #include <rte_ring.h>
 
-#ifdef RTE_ENABLE_DBCHECKER
-    #include <rte_dbchecker.h>
-#endif
-
 //#define TEST_ACT_CPUTIME
 
 #define DEFAULT_NUM_MBUFS 4096
@@ -439,17 +435,6 @@ static int tx_worker(void *arg)
         if (g_profile == PROFILE_CONST && g_rate_bps > 0.0)
             tb_wait(&tb, (double)batch_bytes);
 
-        #ifdef RTE_ENABLE_DBCHECKER
-            #ifdef TEST_ACT_CPUTIME
-                uint64_t start = rte_rdtsc();
-            #endif
-            for (uint16_t i = 0; i < valid; i++) {
-                dbchecker_activate_mtdt_hook(bufs[i], DMA_TO_DEVICE, DEV_ID, false);
-            }
-            #ifdef TEST_ACT_CPUTIME
-                g_activate_cpu_time += (rte_rdtsc() - start);
-            #endif
-        #endif
         uint16_t sent = 0;
         while (sent < (uint16_t)valid) {
             uint16_t n = rte_eth_tx_burst(g_port_id, g_queue_id, &bufs[sent], valid - sent);
@@ -485,11 +470,6 @@ static int rx_worker(void *arg)
 
         /* free received mbufs in bulk */
         rte_pktmbuf_free_bulk(bufs, nb);
-        #ifdef RTE_ENABLE_DBCHECKER
-            for (uint16_t i = 0; i < nb; i++) {
-                dbchecker_deactivate_mtdt_hook(bufs[i]);
-            }
-        #endif
 rx_round_done:
         if (rte_rdtsc() >= deadline)
             break;
@@ -527,10 +507,6 @@ int main(int argc, char **argv)
     uint16_t nb_ports = rte_eth_dev_count_avail();
     if (nb_ports == 0) rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
     if (g_port_id >= nb_ports) rte_exit(EXIT_FAILURE, "Invalid port id %u\n", g_port_id);
-
-    #ifdef RTE_ENABLE_DBCHECKER
-        dbchecker_module_init_hook();
-    #endif
 
     printf("Creating mbuf pool with %u mbufs...\n", g_num_mbufs);
     struct rte_mempool *mp = rte_pktmbuf_pool_create("MBUF_POOL", g_num_mbufs,
@@ -592,10 +568,6 @@ int main(int argc, char **argv)
     s.end_tsc = g_end_tsc ? g_end_tsc : rte_rdtsc();
     printf("\n==== %s ETH stats port=%u ====\n", g_mode_tx ? "TX" : "RX", g_port_id);
     print_stats(g_port_id, &s);
-    #ifdef RTE_ENABLE_DBCHECKER
-        dbchecker_err_handler();
-        dbchecker_module_exit_hook();
-    #endif
     rte_eth_dev_stop(g_port_id);
     rte_eth_dev_close(g_port_id);
     rte_eal_cleanup();

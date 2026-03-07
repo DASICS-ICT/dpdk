@@ -13,6 +13,10 @@ sources += files(
         'igb_rxtx.c',
 )
 
+if get_option('enable_dbchecker')
+        deps += ['dbchecker']
+endif
+
 # do not build IGC on Windows
 if not is_windows
         sources += files(

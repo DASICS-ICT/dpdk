@@ -23,8 +23,6 @@
 
 #include "mbuf_log.h"
 
-extern void dbchecker_alloc_mtdt_hook(struct rte_mbuf *m) __attribute__((weak));
-
 RTE_LOG_REGISTER_DEFAULT(mbuf_logtype, INFO);
 
 /*
@@ -110,8 +108,6 @@ rte_pktmbuf_init(struct rte_mempool *mp,
 	m->port = RTE_MBUF_PORT_INVALID;
 	rte_mbuf_refcnt_set(m, 1);
 	m->next = NULL;
-	if (dbchecker_alloc_mtdt_hook)
-		dbchecker_alloc_mtdt_hook(m);
 }
 
 /*

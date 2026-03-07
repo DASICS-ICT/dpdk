@@ -202,11 +202,6 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 		l2fwd_mac_updating(m, dst_port);
 
 	buffer = tx_buffer[dst_port];
-	#ifdef RTE_ENABLE_DBCHECKER
-		dbchecker_deactivate_mtdt_hook(m);
-		rte_mb();
-		dbchecker_activate_mtdt_hook(m, DMA_TO_DEVICE, DEV_ID, false);
-	#endif
 	rte_mb();
 	sent = rte_eth_tx_buffer(dst_port, 0, buffer, m);
 	if (sent)

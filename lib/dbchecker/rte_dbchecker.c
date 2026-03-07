@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 
 /* public declarations and definitions */
+#include <eal_export.h>
 #include "rte_dbchecker.h"
 
 //#define TEST_DBTE_CACHE_HIT
@@ -143,7 +144,8 @@ uint32_t dbchecker_en_get(void){
 }
 
 
-dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir){
+RTE_EXPORT_SYMBOL(dbchecker_alloc_mtdt)
+dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, uint16_t dev_id){
     //if (!(dbchecker_en_get() & 0xFFFFFFFF))
     //    return addr; // not enabled
 
@@ -162,7 +164,7 @@ dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_dire
     mtdt.lo_bnd = addr & 0xFFFFFFFFFFFFULL;
     mtdt.up_bnd_lo = (uint16_t)((addr + size) & 0xFFFFULL);
     mtdt.up_bnd_hi = (uint32_t)(((addr + size) >> 16) & 0xFFFFFFFFUL);
-    mtdt.dev_id = UNTRUST_DEV_ID;
+    mtdt.dev_id = dev_id & 0x1F;  /* dev_id is 5 bits in mtdt */
 
     /* Find a free slot starting at current counter. The counter encodes
      * [group:12 | offset:4] and increments group first then offset.
@@ -188,11 +190,8 @@ dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_dire
 
     /* fill index_off from low 4 bits (offset) as before */
     mtdt.index_off = (idx & 0xFUL);
-    #ifdef TEST_DBTE_CACHE_HIT
-        mtdt.v = 1;
-    #else
-        mtdt.v = 0;
-    #endif
+    /* alloc-at-use: always set v=1 so hardware can accept DMA immediately */
+    mtdt.v = 1;
 
     /* construct returned iova with table index in high bits as previous design */
     alloc_addr = (addr & 0xFFFFFFFFFFFFULL) | ((uint64_t)idx << 48);
@@ -208,6 +207,7 @@ dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_dire
 }
 
 
+RTE_EXPORT_SYMBOL(dbchecker_free_mtdt)
 dma_addr_t dbchecker_free_mtdt(dma_addr_t addr){
     //if (!(dbchecker_en_get() & 0xFFFFFFFF)) 
     //    return addr; // dbchecker not enabled
@@ -258,6 +258,7 @@ void dbchecker_free_all_mtdt(void){
 }
 
 
+RTE_EXPORT_SYMBOL(dbchecker_err_handler)
 int dbchecker_err_handler(void){
     uint32_t cnt = uio_read32(DBCHECKER_ERR_CNT_OFFSET);
     uint32_t info = uio_read32(DBCHECKER_ERR_INFO_OFFSET);
@@ -289,74 +290,6 @@ int dbchecker_err_handler(void){
         return -1;
     }
     return 0;
-}
-
-int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir, uint16_t dev_id, bool is_non_cached){
-    #ifndef TEST_DBTE_CACHE_HIT
-        if (unlikely(!dbchecker_enable))
-            return 0; // dbchecker not enabled
-
-        uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
-        dbchecker_mtdt_u mtdt;
-        mtdt.raw1 = dbte_table[index].raw1;
-        if (likely(dir <= DMA_TO_DEVICE)) {
-            mtdt.wr = dma_to_db_map[dir];
-        } else {
-            mtdt.wr = DBCHECKER_RWMODE_INVALID;
-        }
-        mtdt.dev_id = dev_id;
-        mtdt.non_cached = is_non_cached ? 1 : 0;
-        mtdt.v = 1;
-        dbte_table[index].raw1 = mtdt.raw1;
-        // printf(" DBCHECKER: activate addr: 0x%llx, index %x, wr %x, dev_id %x raw1 %llx raw0 %llx\n",
-        //     (unsigned long long)addr, index, mtdt.wr, mtdt.dev_id, mtdt.raw1, mtdt.raw0);
-    #endif
-    return 0;
-}
-
-int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir, uint16_t dev_id, bool is_non_cached){
-    if (!m)
-        return -1;
-    if (!RTE_MBUF_DIRECT(m))
-        return -1;
-    dma_addr_t base = (dma_addr_t)rte_mbuf_iova_get(m);
-    return dbchecker_activate_mtdt(base, dir, dev_id, is_non_cached);
-}
-
-int dbchecker_deactivate_mtdt(dma_addr_t addr){
-    #ifndef TEST_DBTE_CACHE_HIT
-        if (unlikely(!dbchecker_enable)) 
-            return 0; // dbchecker not enabled
-
-        uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
-        dbchecker_mtdt_u mtdt;
-        mtdt.raw1 = dbte_table[index].raw1;
-        mtdt.v = 0;
-        dbte_table[index].raw1 = mtdt.raw1;
-        // printf("deactivate mtdt index %x valid %llx\n", index, (unsigned long long)dbte_table[index].v);
-        rte_wmb();
-        if (!mtdt.non_cached){
-            dbchecker_cmd_u free_cmd = {
-                .imm = index,
-                .op  = DBCHECKER_OP_FREE,
-                .v   = 1
-            };
-            //printf("deactivate index %x\n", index);
-            return dbchecker_command(free_cmd.raw);
-        }
-        else return 0;
-    #else
-        return 0;
-    #endif
-}
-
-int dbchecker_deactivate_mtdt_hook(struct rte_mbuf *m){
-    if (unlikely(!m))
-        return -1;
-    if (!RTE_MBUF_DIRECT(m))
-        return -1;
-    dma_addr_t base = (dma_addr_t)rte_mbuf_iova_get(m);
-    return dbchecker_deactivate_mtdt(base);
 }
 
 // static void *err_thread_fn(void *arg)
@@ -462,97 +395,16 @@ void dbchecker_exit(void)
     printf("DBCHECKER (userspace): exit\n");
 }
 
+RTE_EXPORT_SYMBOL(dbchecker_module_init_hook)
 int dbchecker_module_init_hook(void)
 {
     return dbchecker_init();
 }
 
+RTE_EXPORT_SYMBOL(dbchecker_module_exit_hook)
 void dbchecker_module_exit_hook(void)
 {
     dbchecker_exit();
-}
-
-void dbchecker_alloc_mtdt_hook(struct rte_mbuf *m)
-{
-    if (!m || uio_map == NULL)
-        return;
-    if (!RTE_MBUF_DIRECT(m))
-        return;
-    dma_addr_t base = (dma_addr_t)rte_mbuf_iova_get(m);
-    size_t len = (size_t)m->buf_len;
-    if (base == 0 || len == 0)
-        return;
-    /* If IOVA already appears translated (DBChecker encodes table index
-     * in high bits), avoid double-allocating metadata for the same buffer.
-     * This makes the hook idempotent when it is accidentally called twice.
-     */
-    if (((uint64_t)base >> 52) != 0) {
-        DBCHECKER_DEBUG_LOG("dbchecker_alloc_mtdt_hook: mbuf iova already translated 0x%llx, skipping\n",
-            (unsigned long long)base);
-        return;
-    }
-
-    dma_addr_t new_iova = dbchecker_alloc_mtdt(base, len, DMA_BIDIRECTIONAL);
-    if (new_iova != (dma_addr_t)-1) {
-        rte_mbuf_iova_set(m, new_iova);
-        DBCHECKER_DEBUG_LOG("dbchecker_alloc_mtdt_hook: updated mbuf iova 0x%llx -> 0x%llx\n",
-            (unsigned long long)base, (unsigned long long)new_iova);
-    }
-}
-
-void dbchecker_free_mtdt_hook(struct rte_mbuf *m)
-{
-    if (!m || uio_map == NULL)
-        return;
-    if (!RTE_MBUF_DIRECT(m))
-        return;
-    dma_addr_t iova = (dma_addr_t)rte_mbuf_iova_get(m);
-    if (iova == 0)
-        return;
-    /* If IOVA does not contain DBChecker translation bits, skip free.
-     * This avoids double-freeing metadata if the hook was called more than once.
-     */
-    if (((uint64_t)iova >> 52) == 0) {
-        DBCHECKER_DEBUG_LOG("dbchecker_free_mtdt_hook: mbuf iova not translated 0x%llx, skipping\n",
-            (unsigned long long)iova);
-        return;
-    }
-
-    rte_mbuf_iova_set(m, dbchecker_free_mtdt(iova));
-    DBCHECKER_DEBUG_LOG("dbchecker_free_mtdt_hook: freed mbuf iova 0x%llx\n",
-        (unsigned long long)iova);
-}
-
-/* Hooks for memzone allocations/freeing used by ethdev dma-zone helpers. */
-void dbchecker_dma_zone_alloc_hook(const struct rte_memzone *mz)
-{
-    if (!mz || uio_map == NULL)
-        return;
-    dma_addr_t base = (dma_addr_t)mz->iova;
-    size_t len = mz->len;
-    if (base == 0 || len == 0)
-        return;
-    dma_addr_t new_iova = dbchecker_alloc_mtdt(base, len, DMA_BIDIRECTIONAL);
-    if (new_iova != (dma_addr_t)-1) {
-        /* update memzone iova so drivers program the device with the
-         * address that has associated MTDT metadata. Cast away const to
-         * update the internal memzone descriptor. */
-        struct rte_memzone *mz_nc = (struct rte_memzone *)(uintptr_t)mz;
-        mz_nc->iova = (rte_iova_t)new_iova;
-        dbchecker_activate_mtdt(new_iova, DMA_BIDIRECTIONAL, 0x0U, false);
-        DBCHECKER_DEBUG_LOG("dbchecker_dma_zone_alloc_hook: updated memzone '%s' iova 0x%llx -> 0x%llx\n",
-            mz->name, (unsigned long long)base, (unsigned long long)new_iova);
-    }
-}
-
-void dbchecker_dma_zone_free_hook(const struct rte_memzone *mz)
-{
-    if (!mz || uio_map == NULL || !mz->iova)
-        return;
-    struct rte_memzone *mz_nc = (struct rte_memzone *)(uintptr_t)mz;
-    mz_nc->iova = dbchecker_free_mtdt((dma_addr_t)mz_nc->iova);
-    DBCHECKER_DEBUG_LOG("dbchecker_dma_zone_free_hook: freed memzone '%s' iova 0x%llx\n",
-        mz_nc->name, (unsigned long long)mz_nc->iova);
 }
 
 dma_addr_t dbchecker_alloc_mtdt_generic(dma_addr_t addr, size_t size, 

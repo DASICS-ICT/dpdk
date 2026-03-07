@@ -1,11 +1,12 @@
 DPDK_25 {
   global:
-  dbchecker_alloc_mtdt_generic;
-  dbchecker_free_mtdt_generic;
+  dbchecker_alloc_mtdt;
+  dbchecker_free_mtdt;
+  dbchecker_err_handler;
   dbchecker_module_init_hook;
   dbchecker_module_exit_hook;
-  dbchecker_dma_zone_alloc_hook;
-  dbchecker_dma_zone_free_hook;
+  dbchecker_alloc_mtdt_generic;
+  dbchecker_free_mtdt_generic;
 
   local: *;
 };

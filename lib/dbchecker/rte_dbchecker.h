@@ -5,8 +5,6 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include <rte_mbuf.h>
-#include <rte_memzone.h>
 #include <rte_malloc.h>
 
 /* Minimal local replacements for kernel types used by original API */
@@ -118,20 +116,12 @@ void dbchecker_exit(void);
 int dbchecker_command(uint32_t cmd);
 void dbchecker_en_set(uint32_t dev_mask);
 uint32_t dbchecker_en_get(void);
-dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir);
+dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, uint16_t dev_id);
 dma_addr_t dbchecker_free_mtdt(dma_addr_t addr);
-int dbchecker_activate_mtdt(dma_addr_t addr, enum dma_data_direction dir, uint16_t dev_id, bool is_non_cached);
-int dbchecker_deactivate_mtdt(dma_addr_t addr);
 void dbchecker_free_all_mtdt(void);
-int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir, uint16_t dev_id, bool is_non_cached);
-int dbchecker_deactivate_mtdt_hook(struct rte_mbuf *m);
 int dbchecker_err_handler(void);
 int dbchecker_module_init_hook(void);
 void dbchecker_module_exit_hook(void);
-void dbchecker_alloc_mtdt_hook(struct rte_mbuf *m);
-void dbchecker_free_mtdt_hook(struct rte_mbuf *m);
-void dbchecker_dma_zone_alloc_hook(const struct rte_memzone *mz);
-void dbchecker_dma_zone_free_hook(const struct rte_memzone *mz);
 dma_addr_t dbchecker_alloc_mtdt_generic(dma_addr_t addr, 
     size_t size, enum dma_data_direction dir, uint16_t dev_id);
 dma_addr_t dbchecker_free_mtdt_generic(dma_addr_t addr);

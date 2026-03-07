@@ -43,6 +43,10 @@
 #include "base/e1000_api.h"
 #include "e1000_ethdev.h"
 
+#ifdef RTE_ENABLE_DBCHECKER
+#include <rte_dbchecker.h>
+#endif
+
 #ifdef RTE_LIBRTE_IEEE1588
 #define IGB_TX_IEEE1588_TMST RTE_MBUF_F_TX_IEEE1588_TMST
 #else
@@ -62,25 +66,27 @@
 #define IGB_TX_OFFLOAD_NOTSUP_MASK \
 		(RTE_MBUF_F_TX_OFFLOAD_MASK ^ IGB_TX_OFFLOAD_MASK)
 
+#ifndef RTE_ENABLE_DBCHECKER
 typedef uint64_t dma_addr_t;
 enum dma_data_direction {
     DMA_BIDIRECTIONAL = 0,
     DMA_FROM_DEVICE = 1,
     DMA_TO_DEVICE = 2
 };
+#endif
 
 #define DEV_ID 0x0U
 //#define TEST_DEACT_CPUTIME
 uint64_t g_deactivate_cpu_time = 0;
-
-extern int dbchecker_activate_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir, uint16_t dev_id, bool is_non_cached) __attribute__((weak));
-extern int dbchecker_deactivate_mtdt_hook(struct rte_mbuf *m) __attribute__((weak));
 
 /**
  * Structure associated with each descriptor of the RX ring of a RX queue.
  */
 struct igb_rx_entry {
 	struct rte_mbuf *mbuf; /**< mbuf associated with RX descriptor. */
+#ifdef RTE_ENABLE_DBCHECKER
+	uint64_t pkt_addr; /**< Translated DMA addr for dbchecker_free_mtdt (NIC overwrites desc). */
+#endif
 };
 
 /**
@@ -90,6 +96,9 @@ struct igb_tx_entry {
 	struct rte_mbuf *mbuf; /**< mbuf associated with TX desc, if any. */
 	uint16_t next_id; /**< Index of next descriptor in ring. */
 	uint16_t last_id; /**< Index of last scattered descriptor. */
+#ifdef RTE_ENABLE_DBCHECKER
+	uint64_t pkt_addr; /**< Translated DMA addr for dbchecker_free_mtdt. */
+#endif
 };
 
 /**
@@ -427,7 +436,9 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 	uint64_t ts;
 	uint16_t free_i = 0;
 	struct rte_mbuf *to_free_bufs[512];
-
+#ifdef RTE_ENABLE_DBCHECKER
+	uint64_t to_free_addrs[512];
+#endif
 
 	txq = tx_queue;
 	sw_ring = txq->sw_ring;
@@ -576,6 +587,9 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 				RTE_MBUF_PREFETCH_TO_FREE(txn->mbuf);
 
 				if (txe->mbuf != NULL) {
+#ifdef RTE_ENABLE_DBCHECKER
+					to_free_addrs[free_i] = txe->pkt_addr;
+#endif
 					to_free_bufs[free_i++] = txe->mbuf;
 					txe->mbuf = NULL;
 				}
@@ -605,6 +619,9 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 			txd = &txr[tx_id];
 
 			if (txe->mbuf != NULL) {
+#ifdef RTE_ENABLE_DBCHECKER
+				to_free_addrs[free_i] = txe->pkt_addr;
+#endif
 				to_free_bufs[free_i++] = txe->mbuf;
 			}
 			txe->mbuf = m_seg;
@@ -614,8 +631,19 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 			 */
 			slen = (uint16_t) m_seg->data_len;
 			buf_dma_addr = rte_mbuf_data_iova(m_seg);
+#ifdef RTE_ENABLE_DBCHECKER
+			{
+				dma_addr_t translated = dbchecker_alloc_mtdt(buf_dma_addr,
+					(size_t)m_seg->buf_len, DMA_TO_DEVICE, DEV_ID);
+				if (translated != (dma_addr_t)-1)
+					buf_dma_addr = translated;
+			}
+#endif
 			txd->read.buffer_addr =
 				rte_cpu_to_le_64(buf_dma_addr);
+#ifdef RTE_ENABLE_DBCHECKER
+			txe->pkt_addr = buf_dma_addr;
+#endif
 			txd->read.cmd_type_len =
 				rte_cpu_to_le_32(cmd_type_len | slen);
 			txd->read.olinfo_status =
@@ -649,14 +677,15 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 		uint64_t start = rte_rdtsc();
 	#endif
 	for (uint16_t i = 0; i < free_i; i++) {
-		if (dbchecker_deactivate_mtdt_hook) dbchecker_deactivate_mtdt_hook(to_free_bufs[i]);
+#ifdef RTE_ENABLE_DBCHECKER
+		if (((uint64_t)to_free_addrs[i] >> 48) != 0)
+			dbchecker_free_mtdt((dma_addr_t)to_free_addrs[i]);
+#endif
+		rte_pktmbuf_free_seg(to_free_bufs[i]);
 	}
 	#ifdef TEST_DEACT_CPUTIME
 		g_deactivate_cpu_time += (rte_rdtsc() - start);
 	#endif
-	for (uint16_t i = 0; i < free_i; i++) {
-		rte_pktmbuf_free_seg(to_free_bufs[i]);
-	}
 
 	return nb_tx;
 }
@@ -953,9 +982,26 @@ eth_igb_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 
 		rxm = rxe->mbuf;
 		rxe->mbuf = nmb;
-		if (dbchecker_activate_mtdt_hook) dbchecker_activate_mtdt_hook(nmb, DMA_FROM_DEVICE, DEV_ID, false);
+#ifdef RTE_ENABLE_DBCHECKER
+		if (rxe->pkt_addr != (uint64_t)-1) {
+			dbchecker_free_mtdt((dma_addr_t)rxe->pkt_addr);
+		}
+		dma_addr = rte_mbuf_data_iova_default(nmb);
+		{
+			dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)dma_addr,
+				(size_t)nmb->buf_len, DMA_FROM_DEVICE, DEV_ID);
+			if (translated != (dma_addr_t)-1) {
+				dma_addr = translated;
+				rxe->pkt_addr = translated;
+			} else {
+				rxe->pkt_addr = (uint64_t)-1;
+			}
+		}
+		dma_addr = rte_cpu_to_le_64(dma_addr);
+#else
 		dma_addr =
 			rte_cpu_to_le_64(rte_mbuf_data_iova_default(nmb));
+#endif
 		rxdp->read.hdr_addr = 0;
 		rxdp->read.pkt_addr = dma_addr;
 
@@ -1149,7 +1195,25 @@ eth_igb_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		 */
 		rxm = rxe->mbuf;
 		rxe->mbuf = nmb;
+#ifdef RTE_ENABLE_DBCHECKER
+		if (rxe->pkt_addr != (uint64_t)-1) {
+			dbchecker_free_mtdt((dma_addr_t)rxe->pkt_addr);
+		}
+		dma = rte_mbuf_data_iova_default(nmb);
+		{
+			dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)dma,
+				(size_t)nmb->buf_len, DMA_FROM_DEVICE, DEV_ID);
+			if (translated != (dma_addr_t)-1) {
+				dma = translated;
+				rxe->pkt_addr = translated;
+			} else {
+				rxe->pkt_addr = (uint64_t)-1;
+			}
+		}
+		dma = rte_cpu_to_le_64(dma);
+#else
 		dma = rte_cpu_to_le_64(rte_mbuf_data_iova_default(nmb));
+#endif
 		rxdp->read.pkt_addr = dma;
 		rxdp->read.hdr_addr = 0;
 
@@ -1202,7 +1266,11 @@ eth_igb_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		if (unlikely(rxq->crc_len > 0)) {
 			first_seg->pkt_len -= RTE_ETHER_CRC_LEN;
 			if (data_len <= RTE_ETHER_CRC_LEN) {
-				if (dbchecker_deactivate_mtdt_hook) dbchecker_deactivate_mtdt_hook(rxm);
+#ifdef RTE_ENABLE_DBCHECKER
+				if (rxe->pkt_addr != (uint64_t)-1) {
+					dbchecker_free_mtdt((dma_addr_t)rxe->pkt_addr);
+				}
+#endif
 				rte_pktmbuf_free_seg(rxm);
 				first_seg->nb_segs--;
 				last_seg->data_len = (uint16_t)
@@ -1314,7 +1382,11 @@ igb_tx_queue_release_mbufs(struct igb_tx_queue *txq)
 	if (txq->sw_ring != NULL) {
 		for (i = 0; i < txq->nb_tx_desc; i++) {
 			if (txq->sw_ring[i].mbuf != NULL) {
-				if (dbchecker_deactivate_mtdt_hook) dbchecker_deactivate_mtdt_hook(txq->sw_ring[i].mbuf);
+#ifdef RTE_ENABLE_DBCHECKER
+				if (txq->sw_ring[i].pkt_addr != 0 &&
+				    ((uint64_t)txq->sw_ring[i].pkt_addr >> 48) != 0)
+					dbchecker_free_mtdt((dma_addr_t)txq->sw_ring[i].pkt_addr);
+#endif
 				rte_pktmbuf_free_seg(txq->sw_ring[i].mbuf);
 				txq->sw_ring[i].mbuf = NULL;
 			}
@@ -1328,6 +1400,10 @@ igb_tx_queue_release(struct igb_tx_queue *txq)
 	if (txq != NULL) {
 		igb_tx_queue_release_mbufs(txq);
 		rte_free(txq->sw_ring);
+#ifdef RTE_ENABLE_DBCHECKER
+		if (((uint64_t)txq->tx_ring_phys_addr >> 48) != 0)
+			dbchecker_free_mtdt((dma_addr_t)txq->tx_ring_phys_addr);
+#endif
 		rte_memzone_free(txq->mz);
 		rte_free(txq);
 	}
@@ -1397,7 +1473,11 @@ igb_tx_done_cleanup(struct igb_tx_queue *txq, uint32_t free_cnt)
 				 */
 				do {
 					if (sw_ring[tx_id].mbuf) {
-						if (dbchecker_deactivate_mtdt_hook) dbchecker_deactivate_mtdt_hook(sw_ring[tx_id].mbuf);
+#ifdef RTE_ENABLE_DBCHECKER
+						if (sw_ring[tx_id].pkt_addr != 0 &&
+						    ((uint64_t)sw_ring[tx_id].pkt_addr >> 48) != 0)
+							dbchecker_free_mtdt((dma_addr_t)sw_ring[tx_id].pkt_addr);
+#endif
 						rte_pktmbuf_free_seg(
 							sw_ring[tx_id].mbuf);
 						sw_ring[tx_id].mbuf = NULL;
@@ -1614,6 +1694,14 @@ eth_igb_tx_queue_setup(struct rte_eth_dev *dev,
 
 	txq->tdt_reg_addr = E1000_PCI_REG_ADDR(hw, E1000_TDT(txq->reg_idx));
 	txq->tx_ring_phys_addr = tz->iova;
+#ifdef RTE_ENABLE_DBCHECKER
+	{
+		dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)tz->iova,
+			tz->len, DMA_BIDIRECTIONAL, DEV_ID);
+		if (translated != (dma_addr_t)-1)
+			txq->tx_ring_phys_addr = translated;
+	}
+#endif
 
 	txq->tx_ring = (union e1000_adv_tx_desc *) tz->addr;
 	/* Allocate software ring */
@@ -1644,7 +1732,11 @@ igb_rx_queue_release_mbufs(struct igb_rx_queue *rxq)
 	if (rxq->sw_ring != NULL) {
 		for (i = 0; i < rxq->nb_rx_desc; i++) {
 			if (rxq->sw_ring[i].mbuf != NULL) {
-				if (dbchecker_deactivate_mtdt_hook) dbchecker_deactivate_mtdt_hook(rxq->sw_ring[i].mbuf);
+#ifdef RTE_ENABLE_DBCHECKER
+				if (rxq->sw_ring[i].pkt_addr != (uint64_t)-1) {
+					dbchecker_free_mtdt((dma_addr_t)rxq->sw_ring[i].pkt_addr);
+				}
+#endif
 				rte_pktmbuf_free_seg(rxq->sw_ring[i].mbuf);
 				rxq->sw_ring[i].mbuf = NULL;
 			}
@@ -1658,6 +1750,10 @@ igb_rx_queue_release(struct igb_rx_queue *rxq)
 	if (rxq != NULL) {
 		igb_rx_queue_release_mbufs(rxq);
 		rte_free(rxq->sw_ring);
+#ifdef RTE_ENABLE_DBCHECKER
+		if (((uint64_t)rxq->rx_ring_phys_addr >> 48) != 0)
+			dbchecker_free_mtdt((dma_addr_t)rxq->rx_ring_phys_addr);
+#endif
 		rte_memzone_free(rxq->mz);
 		rte_free(rxq);
 	}
@@ -1809,6 +1905,14 @@ eth_igb_rx_queue_setup(struct rte_eth_dev *dev,
 	rxq->rdt_reg_addr = E1000_PCI_REG_ADDR(hw, E1000_RDT(rxq->reg_idx));
 	rxq->rdh_reg_addr = E1000_PCI_REG_ADDR(hw, E1000_RDH(rxq->reg_idx));
 	rxq->rx_ring_phys_addr = rz->iova;
+#ifdef RTE_ENABLE_DBCHECKER
+	{
+		dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)rz->iova,
+			rz->len, DMA_BIDIRECTIONAL, DEV_ID);
+		if (translated != (dma_addr_t)-1)
+			rxq->rx_ring_phys_addr = translated;
+	}
+#endif
 	rxq->rx_ring = (union e1000_adv_rx_desc *) rz->addr;
 
 	/* Allocate software ring. */
@@ -2307,13 +2411,24 @@ igb_alloc_rx_queue_mbufs(struct igb_rx_queue *rxq)
 				     "queue_id=%hu", rxq->queue_id);
 			return -ENOMEM;
 		}
-		dma_addr =
-			rte_cpu_to_le_64(rte_mbuf_data_iova_default(mbuf));
+		dma_addr = rte_mbuf_data_iova_default(mbuf);
+#ifdef RTE_ENABLE_DBCHECKER
+		{
+			dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)dma_addr,
+				(size_t)mbuf->buf_len, DMA_FROM_DEVICE, DEV_ID);
+			if (translated != (dma_addr_t)-1) {
+				dma_addr = translated;
+				rxe[i].pkt_addr = translated;
+			} else {
+				rxe[i].pkt_addr = (uint64_t)-1;
+			}
+		}
+#endif
+		dma_addr = rte_cpu_to_le_64(dma_addr);
 		rxd = &rxq->rx_ring[i];
 		rxd->read.hdr_addr = 0;
 		rxd->read.pkt_addr = dma_addr;
 		rxe[i].mbuf = mbuf;
-		if (dbchecker_activate_mtdt_hook) dbchecker_activate_mtdt_hook(mbuf, DMA_FROM_DEVICE, DEV_ID, false);
 	}
 
 	return 0;
