@@ -28,6 +28,10 @@
 #include "base/e1000_api.h"
 #include "e1000_ethdev.h"
 #include "igb_regs.h"
+#ifdef RTE_ENABLE_DBCHECKER
+#include <rte_dbchecker.h>
+static int igb_dbchecker_refcnt;
+#endif
 
 /*
  * Default values for port configuration
@@ -812,6 +816,16 @@ eth_igb_dev_init(struct rte_eth_dev *eth_dev)
 		return 0;
 	}
 
+#ifdef RTE_ENABLE_DBCHECKER
+	if (igb_dbchecker_refcnt++ == 0) {
+		if (dbchecker_module_init_hook() != 0) {
+			igb_dbchecker_refcnt--;
+			error = -EIO;
+			goto err_late;
+		}
+	}
+#endif
+
 	rte_eth_copy_pci_info(eth_dev, pci_dev);
 
 	hw->hw_addr= (void *)pci_dev->mem_resource[0].addr;
@@ -952,6 +966,10 @@ eth_igb_dev_init(struct rte_eth_dev *eth_dev)
 	return 0;
 
 err_late:
+#ifdef RTE_ENABLE_DBCHECKER
+	if (igb_dbchecker_refcnt > 0)
+		igb_dbchecker_refcnt--;
+#endif
 	igb_hw_control_release(hw);
 
 	return error;
@@ -1708,6 +1726,13 @@ eth_igb_close(struct rte_eth_dev *dev)
 
 	/* clear all the filters list */
 	igb_filterlist_flush(dev);
+
+#ifdef RTE_ENABLE_DBCHECKER
+	if (--igb_dbchecker_refcnt == 0) {
+		dbchecker_err_handler();
+		dbchecker_module_exit_hook();
+	}
+#endif
 
 	return ret;
 }

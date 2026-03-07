@@ -5,8 +5,6 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include <rte_mbuf.h>
-#include <rte_memzone.h>
 #include <rte_malloc.h>
 
 /* Minimal local replacements for kernel types used by original API */
@@ -69,11 +67,7 @@ dma_addr_t dbchecker_free_mtdt(dma_addr_t addr);
 int dbchecker_err_handler(void);
 int dbchecker_module_init_hook(void);
 void dbchecker_module_exit_hook(void);
-void dbchecker_alloc_mtdt_hook(struct rte_mbuf *m, enum dma_data_direction dir);
-void dbchecker_free_mtdt_hook(struct rte_mbuf *m);
-void dbchecker_dma_zone_alloc_hook(const struct rte_memzone *mz);
-void dbchecker_dma_zone_free_hook(const struct rte_memzone *mz);
-dma_addr_t dbchecker_alloc_mtdt_generic(dma_addr_t addr, 
+dma_addr_t dbchecker_alloc_mtdt_generic(dma_addr_t addr,
     size_t size, enum dma_data_direction dir);
 dma_addr_t dbchecker_free_mtdt_generic(dma_addr_t addr);
 

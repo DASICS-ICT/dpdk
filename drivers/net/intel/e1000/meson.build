@@ -3,6 +3,10 @@
 
 subdir('base')
 
+if get_option('enable_dbchecker')
+    deps += ['dbchecker']
+endif
+
 sources += files(
         'e1000_logs.c',
         'em_ethdev.c',
