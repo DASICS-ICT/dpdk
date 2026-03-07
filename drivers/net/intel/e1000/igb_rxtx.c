@@ -82,6 +82,9 @@ uint64_t g_deactivate_cputime = 0;
  */
 struct igb_rx_entry {
 	struct rte_mbuf *mbuf; /**< mbuf associated with RX descriptor. */
+#ifdef RTE_ENABLE_DBCHECKER
+	uint64_t pkt_addr; /**< dbchecker-translated addr for free (descriptor gets overwritten by NIC) */
+#endif
 };
 
 /**
@@ -974,13 +977,16 @@ eth_igb_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		rxm = rxe->mbuf;
 		rxe->mbuf = nmb;
 #ifdef RTE_ENABLE_DBCHECKER
-		dbchecker_free_mtdt(rte_le_to_cpu_64(rxd.read.pkt_addr));
+		if (rxe->pkt_addr != (dma_addr_t)-1)
+			dbchecker_free_mtdt(rxe->pkt_addr);
 		{
 			dma_addr_t orig = (dma_addr_t)rte_mbuf_data_iova_default(nmb);
 			dma_addr_t translated = dbchecker_alloc_mtdt(orig,
 				nmb->buf_len, DMA_FROM_DEVICE);
 			dma_addr = rte_cpu_to_le_64((translated != (dma_addr_t)-1) ?
 				translated : orig);
+			rxe->pkt_addr = (translated != (dma_addr_t)-1) ?
+				translated : (dma_addr_t)-1;
 		}
 #else
 		dma_addr =
@@ -1180,13 +1186,16 @@ eth_igb_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		rxm = rxe->mbuf;
 		rxe->mbuf = nmb;
 #ifdef RTE_ENABLE_DBCHECKER
-		dbchecker_free_mtdt(rte_le_to_cpu_64(rxd.read.pkt_addr));
+		if (rxe->pkt_addr != (dma_addr_t)-1)
+			dbchecker_free_mtdt(rxe->pkt_addr);
 		{
 			dma_addr_t orig = (dma_addr_t)rte_mbuf_data_iova_default(nmb);
 			dma_addr_t translated = dbchecker_alloc_mtdt(orig,
 				nmb->buf_len, DMA_FROM_DEVICE);
 			dma = rte_cpu_to_le_64((translated != (dma_addr_t)-1) ?
 				translated : orig);
+			rxe->pkt_addr = (translated != (dma_addr_t)-1) ?
+				translated : (dma_addr_t)-1;
 		}
 #else
 		dma = rte_cpu_to_le_64(rte_mbuf_data_iova_default(nmb));
@@ -1706,8 +1715,8 @@ igb_rx_queue_release_mbufs(struct igb_rx_queue *rxq)
 		for (i = 0; i < rxq->nb_rx_desc; i++) {
 			if (rxq->sw_ring[i].mbuf != NULL) {
 #ifdef RTE_ENABLE_DBCHECKER
-				dbchecker_free_mtdt(rte_le_to_cpu_64(
-					rxq->rx_ring[i].read.pkt_addr));
+				if (rxq->sw_ring[i].pkt_addr != (dma_addr_t)-1)
+					dbchecker_free_mtdt(rxq->sw_ring[i].pkt_addr);
 #endif
 				rte_pktmbuf_free_seg(rxq->sw_ring[i].mbuf);
 				rxq->sw_ring[i].mbuf = NULL;
@@ -1883,6 +1892,7 @@ eth_igb_rx_queue_setup(struct rte_eth_dev *dev,
 			return -ENOMEM;
 		}
 		rxq->rx_ring_phys_addr = translated;
+		//printf("rxq->rx_ring_phys_addr = %p\n", rxq->rx_ring_phys_addr);
 	}
 #else
 	rxq->rx_ring_phys_addr = rz->iova;
@@ -2392,6 +2402,8 @@ igb_alloc_rx_queue_mbufs(struct igb_rx_queue *rxq)
 				mbuf->buf_len, DMA_FROM_DEVICE);
 			dma_addr = rte_cpu_to_le_64((translated != (dma_addr_t)-1) ?
 				translated : orig);
+			rxe[i].pkt_addr = (translated != (dma_addr_t)-1) ?
+				translated : (dma_addr_t)-1;
 		}
 #else
 		dma_addr =
