@@ -2,6 +2,7 @@
  * Copyright(c) 2026
  */
 
+#include "cdma_common.h"
 #include "cdma_hw.h"
 #include "rte_cdma.h"
 
@@ -15,10 +16,6 @@
 #include <eal_export.h>
 #include <rte_io.h>
 #include <rte_platform_vfio_helper.h>
-
-#ifdef RTE_ENABLE_DBCHECKER
-#include <rte_dbchecker.h>
-#endif
 
 #define CDMA_RESET_RETRIES 50
 #define CDMA_RESET_POLL_US 1000
@@ -68,6 +65,7 @@ cdma_resolve_params(const struct cdma_params *params, struct cdma_params *cfg)
 		cfg->timeout_cycles = params->timeout_cycles;
 
 	cfg->debug_log = params->debug_log;
+	cfg->use_dbchecker = params->use_dbchecker;
 	cfg->dbchecker_dev_id = params->dbchecker_dev_id;
 }
 
@@ -102,6 +100,7 @@ cdma_default_params(struct cdma_params *params)
 	params->region_index = CDMA_DEFAULT_REGION_INDEX;
 	params->timeout_cycles = CDMA_DEFAULT_TIMEOUT_CYCLES;
 	params->debug_log = 0;
+	params->use_dbchecker = 0;
 	params->dbchecker_dev_id = 0;
 }
 
@@ -140,6 +139,16 @@ cdma_open(struct cdma_dev *dev, const struct cdma_params *params)
 	if (rc)
 		return rc;
 
+	if (cfg.use_dbchecker) {
+		rc = cdma_common_dbchecker_acquire();
+		if (rc) {
+			rte_platform_vfio_close(&vfio);
+			memset(dev, 0, sizeof(*dev));
+			dev->dev_fd = -1;
+			return rc;
+		}
+	}
+
 	dev->regs = vfio.regs;
 	dev->regs_size = vfio.regs_size;
 	dev->dev_fd = vfio.dev_fd;
@@ -148,6 +157,7 @@ cdma_open(struct cdma_dev *dev, const struct cdma_params *params)
 	dev->region_index = vfio.region_index;
 	dev->timeout_cycles = cfg.timeout_cycles;
 	dev->debug_log = cfg.debug_log;
+	dev->use_dbchecker = cfg.use_dbchecker ? 1 : 0;
 	dev->dbchecker_dev_id = cfg.dbchecker_dev_id;
 
 	cdma_log(dev->debug_log,
@@ -189,12 +199,8 @@ cdma_copy(struct cdma_dev *dev, uint64_t src_iova, uint64_t dst_iova,
 {
 	uint32_t cr;
 	int rc;
-#ifdef RTE_ENABLE_DBCHECKER
-	dma_addr_t src_prog;
-	dma_addr_t dst_prog;
-#endif
-	uint64_t src_use = src_iova;
-	uint64_t dst_use = dst_iova;
+	uint64_t src_use;
+	uint64_t dst_use;
 
 	if (dev == NULL || dev->regs == NULL || len == 0)
 		return -EINVAL;
@@ -218,22 +224,10 @@ cdma_copy(struct cdma_dev *dev, uint64_t src_iova, uint64_t dst_iova,
 		return rc;
 	}
 
-#ifdef RTE_ENABLE_DBCHECKER
-	/* CDMA reads src and writes dst — align with igb tx/rx dma direction naming. */
-	src_prog = dbchecker_alloc_mtdt((dma_addr_t)src_iova, len, DMA_TO_DEVICE,
-		dev->dbchecker_dev_id);
-	dst_prog = dbchecker_alloc_mtdt((dma_addr_t)dst_iova, len, DMA_FROM_DEVICE,
-		dev->dbchecker_dev_id);
-	if (src_prog == (dma_addr_t)-1 || dst_prog == (dma_addr_t)-1) {
-		if (src_prog != (dma_addr_t)-1)
-			dbchecker_free_mtdt(src_prog);
-		if (dst_prog != (dma_addr_t)-1)
-			dbchecker_free_mtdt(dst_prog);
-		return -ENOMEM;
-	}
-	src_use = (uint64_t)src_prog;
-	dst_use = (uint64_t)dst_prog;
-#endif
+	rc = cdma_common_copy_iova_prepare(dev->use_dbchecker, dev->dbchecker_dev_id,
+		src_iova, dst_iova, len, &src_use, &dst_use);
+	if (rc)
+		return rc;
 
 	cdma_reg_write(dev->regs, XAXICDMA_SRCADDR_OFFSET,
 		(uint32_t)(src_use & 0xFFFFFFFFu));
@@ -247,10 +241,7 @@ cdma_copy(struct cdma_dev *dev, uint64_t src_iova, uint64_t dst_iova,
 
 	rc = cdma_wait_idle(dev, dev->timeout_cycles);
 
-#ifdef RTE_ENABLE_DBCHECKER
-	dbchecker_free_mtdt(src_prog);
-	dbchecker_free_mtdt(dst_prog);
-#endif
+	cdma_common_copy_iova_finish(dev->use_dbchecker, src_use, dst_use);
 
 	return rc;
 }
@@ -263,6 +254,9 @@ cdma_close(struct cdma_dev *dev)
 
 	if (dev == NULL)
 		return;
+
+	if (dev->use_dbchecker)
+		cdma_common_dbchecker_release();
 
 	memset(&vfio, 0, sizeof(vfio));
 	vfio.regs = dev->regs;
@@ -283,5 +277,6 @@ cdma_close(struct cdma_dev *dev)
 	dev->region_index = 0;
 	dev->timeout_cycles = 0;
 	dev->debug_log = 0;
+	dev->use_dbchecker = 0;
 	dev->dbchecker_dev_id = 0;
 }
