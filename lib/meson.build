@@ -25,6 +25,7 @@ libraries = [
         'meter',
         'ethdev',
         'pci', # core
+        'platform_vfio_helper',
         'cmdline',
         'metrics', # bitrate/latency stats depends on this
         'hash',    # efd depends on this
@@ -35,6 +36,7 @@ libraries = [
         'bpf',
         'cfgfile',
         'compressdev',
+        'cdma',
         'cryptodev',
         'distributor',
         'dmadev',  # eventdev depends on this
@@ -128,6 +130,11 @@ foreach l:libraries
     if l == 'dbchecker' and not enable_dbchecker
         build = false
         reason = 'dbchecker disabled by default; enable with -Denable_dbchecker=true'
+    endif
+    enable_cdma = get_option('enable_cdma')
+    if (l == 'cdma' or l == 'platform_vfio_helper') and not enable_cdma
+        build = false
+        reason = 'cdma stack disabled; enable with -Denable_cdma=true'
     endif
     use_function_versioning = false
     annotate_locks = true
