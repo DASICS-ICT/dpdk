@@ -10,3 +10,6 @@ endif
 sources = files('rte_cdma.c')
 headers = files('rte_cdma.h')
 deps += ['platform_vfio_helper']
+if get_option('enable_dbchecker')
+    deps += ['dbchecker']
+endif

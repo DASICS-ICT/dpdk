@@ -5,6 +5,9 @@
  *   dpdk-cdma_demo [EAL options] -- [-d <device>] [-l <len>] [-t <timeout>]
  *
  * The CDMA platform device must be bound to vfio-platform beforehand.
+ *
+ * When DPDK is built with -Denable_dbchecker=true, librte_cdma links dbchecker;
+ * cdma_copy then registers src/dst with dbchecker if it is initialized and enabled.
  */
 
 #include <getopt.h>
