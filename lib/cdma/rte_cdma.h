@@ -22,8 +22,6 @@
 	.region_index = 0, \
 	.timeout_cycles = 0, \
 	.debug_log = 0, \
-	.use_dbchecker = 0, \
-	.dbchecker_dev_id = 0, \
 }
 
 struct cdma_params {
@@ -32,10 +30,6 @@ struct cdma_params {
 	uint32_t region_index;
 	uint32_t timeout_cycles;
 	int debug_log;
-	/** Non-zero: open dbchecker via module hook (refcnt) and wrap cdma_copy IOVAs. */
-	int use_dbchecker;
-	/** Passed to dbchecker_alloc_mtdt when use_dbchecker and RTE_ENABLE_DBCHECKER. */
-	uint16_t dbchecker_dev_id;
 };
 
 struct cdma_dev {
@@ -47,8 +41,6 @@ struct cdma_dev {
 	uint32_t region_index;
 	uint32_t timeout_cycles;
 	int debug_log;
-	int use_dbchecker;
-	uint16_t dbchecker_dev_id;
 };
 
 void cdma_default_params(struct cdma_params *params);
@@ -63,9 +55,8 @@ void cdma_close(struct cdma_dev *dev);
  *   deps += ['cdma']
  *   #include <rte_cdma.h>
  * Pass IOVA from DPDK-managed memory (e.g. rte_malloc).
- * use_dbchecker: non-zero runs dbchecker_module_init_hook on cdma_open (refcnt, like igb)
- * and wraps cdma_copy; zero skips hook and uses plain IOVAs. Requires -Denable_dbchecker=true
- * for hardware metadata; otherwise use_dbchecker is ignored at compile time.
+ * dbchecker support is controlled entirely by the build flag -Denable_dbchecker=true;
+ * no runtime switch is needed.
  */
 
 #endif /* RTE_CDMA_H */

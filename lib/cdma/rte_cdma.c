@@ -65,8 +65,6 @@ cdma_resolve_params(const struct cdma_params *params, struct cdma_params *cfg)
 		cfg->timeout_cycles = params->timeout_cycles;
 
 	cfg->debug_log = params->debug_log;
-	cfg->use_dbchecker = params->use_dbchecker;
-	cfg->dbchecker_dev_id = params->dbchecker_dev_id;
 }
 
 static int
@@ -100,8 +98,6 @@ cdma_default_params(struct cdma_params *params)
 	params->region_index = CDMA_DEFAULT_REGION_INDEX;
 	params->timeout_cycles = CDMA_DEFAULT_TIMEOUT_CYCLES;
 	params->debug_log = 0;
-	params->use_dbchecker = 0;
-	params->dbchecker_dev_id = 0;
 }
 
 RTE_EXPORT_SYMBOL(cdma_open)
@@ -139,16 +135,6 @@ cdma_open(struct cdma_dev *dev, const struct cdma_params *params)
 	if (rc)
 		return rc;
 
-	if (cfg.use_dbchecker) {
-		rc = cdma_common_dbchecker_acquire();
-		if (rc) {
-			rte_platform_vfio_close(&vfio);
-			memset(dev, 0, sizeof(*dev));
-			dev->dev_fd = -1;
-			return rc;
-		}
-	}
-
 	dev->regs = vfio.regs;
 	dev->regs_size = vfio.regs_size;
 	dev->dev_fd = vfio.dev_fd;
@@ -157,8 +143,6 @@ cdma_open(struct cdma_dev *dev, const struct cdma_params *params)
 	dev->region_index = vfio.region_index;
 	dev->timeout_cycles = cfg.timeout_cycles;
 	dev->debug_log = cfg.debug_log;
-	dev->use_dbchecker = cfg.use_dbchecker ? 1 : 0;
-	dev->dbchecker_dev_id = cfg.dbchecker_dev_id;
 
 	cdma_log(dev->debug_log,
 		"mapped region %u at %p (size=0x%zx)",
@@ -224,11 +208,12 @@ cdma_copy(struct cdma_dev *dev, uint64_t src_iova, uint64_t dst_iova,
 		return rc;
 	}
 
-	rc = cdma_common_copy_iova_prepare(dev->use_dbchecker, dev->dbchecker_dev_id,
-		src_iova, dst_iova, len, &src_use, &dst_use);
+	rc = cdma_common_copy_iova_prepare(src_iova, dst_iova, len,
+		&src_use, &dst_use);
 	if (rc)
 		return rc;
-
+	printf("src_use=0x%016" PRIx64 " dst_use=0x%016" PRIx64 "\n", 
+		(unsigned long long)src_use, (unsigned long long)dst_use);
 	cdma_reg_write(dev->regs, XAXICDMA_SRCADDR_OFFSET,
 		(uint32_t)(src_use & 0xFFFFFFFFu));
 	cdma_reg_write(dev->regs, XAXICDMA_SRCADDR_MSB_OFFSET,
@@ -241,7 +226,7 @@ cdma_copy(struct cdma_dev *dev, uint64_t src_iova, uint64_t dst_iova,
 
 	rc = cdma_wait_idle(dev, dev->timeout_cycles);
 
-	cdma_common_copy_iova_finish(dev->use_dbchecker, src_use, dst_use);
+	cdma_common_copy_iova_finish(src_use, dst_use);
 
 	return rc;
 }
@@ -254,9 +239,6 @@ cdma_close(struct cdma_dev *dev)
 
 	if (dev == NULL)
 		return;
-
-	if (dev->use_dbchecker)
-		cdma_common_dbchecker_release();
 
 	memset(&vfio, 0, sizeof(vfio));
 	vfio.regs = dev->regs;
@@ -277,6 +259,4 @@ cdma_close(struct cdma_dev *dev)
 	dev->region_index = 0;
 	dev->timeout_cycles = 0;
 	dev->debug_log = 0;
-	dev->use_dbchecker = 0;
-	dev->dbchecker_dev_id = 0;
 }
