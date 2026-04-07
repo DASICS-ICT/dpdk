@@ -63,7 +63,6 @@ option('tests', type: 'boolean', value: true, description:
 option('use_hpet', type: 'boolean', value: false, description:
        'use HPET timer in EAL')
 
-# Optional dbchecker library. Disabled by default to avoid creating an
-# implicit dependency on /dev/uio devices and user-space drivers.
+# Optional dbchecker library. Disabled by default.
 option('enable_dbchecker', type: 'boolean', value: false, description:
-       'Enable building lib/dbchecker (default: false)')
+       'Enable building lib/dbchecker (vfio-platform; default: false)')

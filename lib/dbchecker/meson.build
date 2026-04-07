@@ -9,3 +9,4 @@ endif
 
 sources = files('rte_dbchecker.c')
 headers = files('rte_dbchecker.h')
+deps += ['platform_vfio_helper']

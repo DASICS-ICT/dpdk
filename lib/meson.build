@@ -20,12 +20,13 @@ libraries = [
         'rcu', # rcu depends on ring
         'mempool',
         'mbuf',
+        # platform_vfio_helper before dbchecker/cdma (they depend on it)
+        'platform_vfio_helper',
         'dbchecker',
         'net',
         'meter',
         'ethdev',
         'pci', # core
-        'platform_vfio_helper',
         'cmdline',
         'metrics', # bitrate/latency stats depends on this
         'hash',    # efd depends on this
@@ -123,18 +124,20 @@ foreach l:libraries
     build = true
     reason = '<unknown reason>' # set if build == false to explain why
     name = l
-    # dbchecker is optional and disabled by default. Allow explicit enabling
-    # via -Denable_dbchecker=true. This prevents introducing an implicit
-    # dependency on user-space UIO devices unless the user opts in.
+    # dbchecker is optional and disabled by default (-Denable_dbchecker=true).
     enable_dbchecker = get_option('enable_dbchecker')
     if l == 'dbchecker' and not enable_dbchecker
         build = false
         reason = 'dbchecker disabled by default; enable with -Denable_dbchecker=true'
     endif
     enable_cdma = get_option('enable_cdma')
-    if (l == 'cdma' or l == 'platform_vfio_helper') and not enable_cdma
+    if l == 'cdma' and not enable_cdma
         build = false
-        reason = 'cdma stack disabled; enable with -Denable_cdma=true'
+        reason = 'cdma disabled; enable with -Denable_cdma=true'
+    endif
+    if l == 'platform_vfio_helper' and not enable_cdma and not enable_dbchecker
+        build = false
+        reason = 'platform_vfio_helper requires -Denable_cdma=true or -Denable_dbchecker=true'
     endif
     use_function_versioning = false
     annotate_locks = true

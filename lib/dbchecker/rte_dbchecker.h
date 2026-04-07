@@ -15,9 +15,10 @@ enum dma_data_direction {
     DMA_TO_DEVICE = 2
 };
 
-#define DBCHECKER_BASE_ADDR 0x40000000ULL
-#define DBCHECKER_REG_SIZE 4 /* 32bit */
-#define DBCHECKER_REG_NUM 10 /* 10 registers */
+#define DBCHECKER_DEFAULT_PLATFORM_BUS_DEVICES_PATH "/sys/bus/platform/devices"
+/** Default sysfs device name (adjust to match the board, e.g. 81000000.dbchecker). */
+#define DBCHECKER_DEFAULT_DEVICE_NAME "81000000.dbchecker"
+#define DBCHECKER_DEFAULT_REGION_INDEX 0u
 
 #define DBCHECKER_EN_OFFSET          0x00U
 #define DBCHECKER_CMD_OFFSET         0x04U
@@ -43,31 +44,16 @@ enum dbchecker_rw_mode {
 };
 
 static const enum dbchecker_rw_mode dma_to_db_map[] = {
-    [DMA_BIDIRECTIONAL] = DBCHECKER_RWMODE_RW, // Index 0 -> Value 3
-    [DMA_FROM_DEVICE]   = DBCHECKER_RWMODE_WO, // Index 1 -> Value 2
-    [DMA_TO_DEVICE]     = DBCHECKER_RWMODE_RO  // Index 2 -> Value 1
+    [DMA_BIDIRECTIONAL] = DBCHECKER_RWMODE_RW, /* Index 0 -> Value 3 */
+    [DMA_FROM_DEVICE]   = DBCHECKER_RWMODE_WO, /* Index 1 -> Value 2 */
+    [DMA_TO_DEVICE]     = DBCHECKER_RWMODE_RO  /* Index 2 -> Value 1 */
 };
-
-// we assume that we use little-endian system
-// struct dbchecker_mtdt {
-//     uint64_t lo_bnd    : 48;
-//     uint64_t up_bnd_lo : 16;
-//     uint64_t up_bnd_hi : 32;
-//     uint64_t dev_id    : 5;
-//     uint64_t wr        : 2;
-//     uint64_t v         : 1;
-//     uint64_t non_cached: 1;
-//     uint64_t reserved  : 19;
-//     uint64_t index_off : 4;
-// }__attribute__((packed));
 
 typedef union {
     struct {
-        // --- Word 0 (low 64) ---
         uint64_t lo_bnd    : 48;
         uint64_t up_bnd_lo : 16;
-        
-        // --- Word 1 (hi 64) ---
+
         uint64_t up_bnd_hi : 32;
         uint64_t dev_id    : 5;
         uint64_t wr        : 2;
@@ -78,24 +64,18 @@ typedef union {
     } __attribute__((packed));
 
     struct {
-        uint64_t raw0; // word 0
-        uint64_t raw1; // word 1
+        uint64_t raw0;
+        uint64_t raw1;
     };
 } dbchecker_mtdt_u;
 
-// struct dbchecker_cmd {
-//   uint32_t imm    : 30; /* index of the mtdt to be cleaned */
-//   uint32_t op     : 1;
-//   uint32_t v      : 1;
-// }__attribute__((packed));
-
 typedef union {
     struct {
-        uint32_t imm : 30; // 低 30 位
-        uint32_t op  : 1;  // 第 31 位
-        uint32_t v   : 1;  // 第 32 位 (最高位)
+        uint32_t imm : 30;
+        uint32_t op  : 1;
+        uint32_t v   : 1;
     };
-    uint32_t raw; // 整个 4 字节视图
+    uint32_t raw;
 } __attribute__((packed, aligned(4))) dbchecker_cmd_u;
 
 #define DBCHECKER_ENABLE_MASK 0x3UL /* bypass device 31 by default */
@@ -110,6 +90,16 @@ typedef union {
                         printf(fmt, ##args); \
         } while (0)
 
+struct dbchecker_params {
+	const char *bus_devices_path;
+	const char *device_name;
+	uint32_t region_index;
+	int debug_log;
+};
+
+void dbchecker_default_params(struct dbchecker_params *params);
+int dbchecker_init_with_params(const struct dbchecker_params *params);
+
 /* Public API */
 int dbchecker_init(void);
 void dbchecker_exit(void);
@@ -122,7 +112,7 @@ void dbchecker_free_all_mtdt(void);
 int dbchecker_err_handler(void);
 int dbchecker_module_init_hook(void);
 void dbchecker_module_exit_hook(void);
-dma_addr_t dbchecker_alloc_mtdt_generic(dma_addr_t addr, 
+dma_addr_t dbchecker_alloc_mtdt_generic(dma_addr_t addr,
     size_t size, enum dma_data_direction dir, uint16_t dev_id);
 dma_addr_t dbchecker_free_mtdt_generic(dma_addr_t addr);
 
