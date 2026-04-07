@@ -80,7 +80,6 @@ dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, 
 {
 	if (!dbchecker_enable)
 		return addr;
-
 	dbchecker_mtdt_u mtdt;
 	if (likely(dir <= DMA_TO_DEVICE))
 		mtdt.wr = dma_to_db_map[dir];
@@ -121,6 +120,8 @@ dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, 
 	rte_wmb();
 	dbte_table[idx].raw1 = mtdt.raw1;
 	dbte_alloc_id = dbte_next_id(idx);
+	// printf("DBCHECKER: alloc mtdt idx %u for addr 0x%lx size 0x%zx (use iova 0x%lx)\n",
+	// 	idx, (unsigned long long)addr, size, (unsigned long long)alloc_addr);
 	return alloc_addr;
 }
 
@@ -267,7 +268,7 @@ dbchecker_init_with_params(const struct dbchecker_params *params)
 
 	uint64_t dbte_table_phys = rte_mem_virt2iova((const void *)dbte_table);
 
-	DBCHECKER_DEBUG_LOG("DBChecker: dbte_table_phys = %lx\n", dbte_table_phys);
+	DBCHECKER_DEBUG_LOG("DBChecker: dbte_table_iova = %lx\n", dbte_table_phys);
 	dbchecker_reg_write32(DBCHECKER_DBTE_MB_LO_OFFSET,
 		(uint32_t)(dbte_table_phys & 0xFFFFFFFFUL));
 	dbchecker_reg_write32(DBCHECKER_DBTE_MB_HI_OFFSET,
