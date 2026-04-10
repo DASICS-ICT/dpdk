@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright(c) 2017 Intel Corporation
+
+# meson file, for building this example as part of a main DPDK build.
+#
+# To build this example as a standalone application with an already-installed
+# DPDK instance, use 'make'
+
+deps += ['security', 'lpm', 'acl', 'hash', 'ip_frag', 'ipsec', 'eventdev', 'telemetry', 'cdma']
+allow_experimental_apis = true
+sources = files(
+        'cdma_poc_gateway.c',
+        'esp.c',
+        'event_helper.c',
+        'flow.c',
+        'ipsec.c',
+        'ipsec_process.c',
+        'ipsec-secgw.c',
+        'ipsec_worker.c',
+        'parser.c',
+        'rt.c',
+        'sa.c',
+        'sad.c',
+        'sp4.c',
+        'sp6.c',
+)
+
+cflags += no_wvla_cflag
+
+app_cflags = ['-Wno-address-of-packed-member']
+foreach flag:app_cflags
+    if cc.has_argument(flag)
+        cflags += flag
+    endif
+endforeach

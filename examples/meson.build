@@ -23,6 +23,7 @@ all_examples = [
         'ip_pipeline',
         'ip_reassembly',
         'ipsec-secgw',
+        'ipsec-secgw-cdma-poc',
         'ipv4_multicast',
         'l2fwd',
         'l2fwd-cat',

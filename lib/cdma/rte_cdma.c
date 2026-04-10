@@ -212,8 +212,6 @@ cdma_copy(struct cdma_dev *dev, uint64_t src_iova, uint64_t dst_iova,
 		&src_use, &dst_use);
 	if (rc)
 		return rc;
-	printf("src_use=0x%016" PRIx64 " dst_use=0x%016" PRIx64 "\n", 
-		(unsigned long long)src_use, (unsigned long long)dst_use);
 	cdma_reg_write(dev->regs, XAXICDMA_SRCADDR_OFFSET,
 		(uint32_t)(src_use & 0xFFFFFFFFu));
 	cdma_reg_write(dev->regs, XAXICDMA_SRCADDR_MSB_OFFSET,
