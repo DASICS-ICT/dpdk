@@ -19,6 +19,7 @@
 #include <signal.h>
 #include <rte_atomic.h>
 #include <rte_ring.h>
+#include <rte_malloc.h>
 
 //#define TEST_ACT_CPUTIME
 
@@ -73,6 +74,8 @@ static struct onoff_profile g_onoff = {0, 0, 1, 0};
 static uint32_t g_seed = 1;
 static uint8_t g_eth_hdr_template[sizeof(struct rte_ether_hdr)];
 static uint64_t g_rng_state = 1;
+static int g_data_copy = 0;           /* --data-copy: copy each RX pkt to scratch buf */
+static uint8_t *g_scratch_buf = NULL; /* pre-allocated scratch buffer for data-copy test */
 
 struct perf_stats {
     uint64_t total_bytes;
@@ -94,12 +97,14 @@ static void usage(const char *prg)
     printf("Usage: %s [EAL args] -- [--tx|--rx] [--port N] [--queue Q] [--burst B] [--size S] [--seconds T] [--mbufs N]\n", prg);
     printf("        [--dst-mac xx:xx:xx:xx:xx:xx] [--profile const|poisson|onoff] [--rate-bps N]\n");
     printf("        [--size-bimodal small,big,prob] [--onoff on_ms,off_ms] [--seed N]\n");
+    printf("        [--data-copy]\n");
     printf("  --mbufs N: Set number of mbufs (range: 4096-65536, default: %d)\n", DEFAULT_NUM_MBUFS);
     printf("  --profile: Traffic pattern. const (default), poisson (random IAT), onoff (burst/silent)\n");
     printf("  --rate-bps: Target bytes per second (0=unlimited)\n");
     printf("  --size-bimodal: Enable two-size mix, e.g. 64,1500,0.3 (30%% large)\n");
     printf("  --onoff: On/off durations in ms, e.g. 200,100\n");
     printf("  --seed: RNG seed for reproducibility\n");
+    printf("  --data-copy: Copy each RX packet to scratch buffer (measure copy overhead)\n");
 }
 
 static volatile sig_atomic_t g_stop;
@@ -256,6 +261,9 @@ static void parse_app_args(int argc, char **argv)
         }
         else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
             g_seed = (uint32_t)atoi(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--data-copy") == 0) {
+            g_data_copy = 1;
         }
         else if (strcmp(argv[i], "--dst-mac") == 0 && i + 1 < argc) {
             if (parse_mac(argv[++i], &g_dst_mac) == 0)
@@ -468,6 +476,14 @@ static int rx_worker(void *arg)
             goto rx_round_done;
         }
 
+        if (g_data_copy) {
+            for (uint16_t i = 0; i < nb; i++) {
+                rte_memcpy(g_scratch_buf + (uint32_t)i * RTE_MBUF_DEFAULT_BUF_SIZE,
+                           rte_pktmbuf_mtod(bufs[i], void *),
+                           bufs[i]->data_len);
+            }
+        }
+
         /* free received mbufs in bulk */
         rte_pktmbuf_free_bulk(bufs, nb);
 rx_round_done:
@@ -516,6 +532,15 @@ int main(int argc, char **argv)
     /* store global mempool; rings removed since tx_worker now allocs/frees mbufs */
     g_mp = mp;
 
+    if (g_data_copy && !g_mode_tx) {
+        uint32_t scratch_burst = g_burst > 512 ? 512 : g_burst;
+        g_scratch_buf = rte_zmalloc_socket("scratch",
+            (size_t)scratch_burst * RTE_MBUF_DEFAULT_BUF_SIZE,
+            RTE_CACHE_LINE_SIZE, rte_socket_id());
+        if (!g_scratch_buf)
+            rte_exit(EXIT_FAILURE, "Cannot allocate scratch buffer\n");
+    }
+
     if (port_init(g_port_id, mp) < 0) rte_exit(EXIT_FAILURE, "Cannot init port %u\n", g_port_id);
 
     /* wait for link up (try up to 30 seconds) to increase chance first tx_burst succeeds) */
@@ -538,8 +563,8 @@ int main(int argc, char **argv)
             printf("Port %u: link not up after %u seconds, continuing anyway\n", g_port_id, wait_secs);
     }
 
-    printf("Starting %s test on port %u queue %u burst=%u size=%u mbufs=%u s=%u... \n",
-        g_mode_tx ? "TX" : "RX", g_port_id, g_queue_id, g_burst, g_pkt_size, g_num_mbufs, g_seconds);
+    printf("Starting %s test on port %u queue %u burst=%u size=%u mbufs=%u s=%u data-copy=%d... \n",
+        g_mode_tx ? "TX" : "RX", g_port_id, g_queue_id, g_burst, g_pkt_size, g_num_mbufs, g_seconds, g_data_copy);
 
     /* initialize shared counters (published by worker at end) */
     g_worker_done = 0;
@@ -570,6 +595,7 @@ int main(int argc, char **argv)
     print_stats(g_port_id, &s);
     rte_eth_dev_stop(g_port_id);
     rte_eth_dev_close(g_port_id);
+    rte_free(g_scratch_buf);
     rte_eal_cleanup();
     return 0;
 }
