@@ -100,7 +100,7 @@ static uint64_t vnic_tx_burst(struct vnic_rxtx_desc_queue *txq, uint64_t nb_pkts
 		#ifndef RTE_ENABLE_DBCHECKER
 			tx_desc->buf = orig_buf;
 		#else
-			tx_desc->buf = dbchecker_alloc_mtdt(orig_buf, pkt_size, DMA_TO_DEVICE, VNIC_DEV_ID);
+			tx_desc->buf = dbchecker_alloc_mtdt(orig_buf, pkt_size, DMA_TO_DEVICE, VNIC_DEV_ID, true);
 			dbchecker_activate_mtdt(tx_desc->buf, DMA_TO_DEVICE, VNIC_DEV_ID, false);
 		#endif
 		tx_desc->len = pkt_size;          // 实际数据包长度
@@ -157,7 +157,7 @@ static uint64_t vnic_tx_poc(struct vnic_rxtx_desc_queue *txq, enum vnic_desc_op 
 		#ifndef RTE_ENABLE_DBCHECKER
 			tx_desc->buf = orig_buf;
 		#else
-			tx_desc->buf = dbchecker_alloc_mtdt(orig_buf, 64, DMA_TO_DEVICE, op == VNIC_DESC_OP_DEV_SPOOF ? 0xf : VNIC_DEV_ID);
+			tx_desc->buf = dbchecker_alloc_mtdt(orig_buf, 64, DMA_TO_DEVICE, op == VNIC_DESC_OP_DEV_SPOOF ? 0xf : VNIC_DEV_ID, true);
 			dbchecker_activate_mtdt(tx_desc->buf, DMA_TO_DEVICE, tx_desc->op == VNIC_DESC_OP_DEV_SPOOF ? 0xf : VNIC_DEV_ID, false);
 			if (tx_desc->op == VNIC_DESC_OP_USE_AFTER_FREE) {
 				//printf("free before use tx desc buf\n");
@@ -245,7 +245,7 @@ static uint64_t vnic_rx_burst(struct vnic_rxtx_desc_queue *rxq, uint64_t nb_pkts
 		#ifndef RTE_ENABLE_DBCHECKER
 			rx_desc->buf = orig_buf;
 		#else
-			rx_desc->buf = dbchecker_alloc_mtdt(orig_buf, pkt_size, DMA_FROM_DEVICE, VNIC_DEV_ID);
+			rx_desc->buf = dbchecker_alloc_mtdt(orig_buf, pkt_size, DMA_FROM_DEVICE, VNIC_DEV_ID, true);
 			dbchecker_activate_mtdt(rx_desc->buf, DMA_FROM_DEVICE, VNIC_DEV_ID, false);
 		#endif
 		rx_desc->len = pkt_size;          // 实际数据包长度

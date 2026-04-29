@@ -634,7 +634,7 @@ eth_igb_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 #ifdef RTE_ENABLE_DBCHECKER
 			{
 				dma_addr_t translated = dbchecker_alloc_mtdt(buf_dma_addr,
-					(size_t)m_seg->buf_len, DMA_TO_DEVICE, DEV_ID);
+					(size_t)m_seg->buf_len, DMA_TO_DEVICE, DEV_ID, true);
 				if (translated != (dma_addr_t)-1)
 					buf_dma_addr = translated;
 			}
@@ -989,7 +989,7 @@ eth_igb_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		dma_addr = rte_mbuf_data_iova_default(nmb);
 		{
 			dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)dma_addr,
-				(size_t)nmb->buf_len, DMA_FROM_DEVICE, DEV_ID);
+				(size_t)nmb->buf_len, DMA_FROM_DEVICE, DEV_ID, true);
 			if (translated != (dma_addr_t)-1) {
 				dma_addr = translated;
 				rxe->pkt_addr = translated;
@@ -1202,7 +1202,7 @@ eth_igb_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		dma = rte_mbuf_data_iova_default(nmb);
 		{
 			dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)dma,
-				(size_t)nmb->buf_len, DMA_FROM_DEVICE, DEV_ID);
+				(size_t)nmb->buf_len, DMA_FROM_DEVICE, DEV_ID, true);
 			if (translated != (dma_addr_t)-1) {
 				dma = translated;
 				rxe->pkt_addr = translated;
@@ -1697,7 +1697,7 @@ eth_igb_tx_queue_setup(struct rte_eth_dev *dev,
 #ifdef RTE_ENABLE_DBCHECKER
 	{
 		dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)tz->iova,
-			tz->len, DMA_BIDIRECTIONAL, DEV_ID);
+			tz->len, DMA_BIDIRECTIONAL, DEV_ID, false);
 		if (translated != (dma_addr_t)-1)
 			txq->tx_ring_phys_addr = translated;
 	}
@@ -1908,7 +1908,7 @@ eth_igb_rx_queue_setup(struct rte_eth_dev *dev,
 #ifdef RTE_ENABLE_DBCHECKER
 	{
 		dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)rz->iova,
-			rz->len, DMA_BIDIRECTIONAL, DEV_ID);
+			rz->len, DMA_BIDIRECTIONAL, DEV_ID, false);
 		if (translated != (dma_addr_t)-1)
 			rxq->rx_ring_phys_addr = translated;
 	}
@@ -2415,7 +2415,7 @@ igb_alloc_rx_queue_mbufs(struct igb_rx_queue *rxq)
 #ifdef RTE_ENABLE_DBCHECKER
 		{
 			dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)dma_addr,
-				(size_t)mbuf->buf_len, DMA_FROM_DEVICE, DEV_ID);
+				(size_t)mbuf->buf_len, DMA_FROM_DEVICE, DEV_ID, true);
 			if (translated != (dma_addr_t)-1) {
 				dma_addr = translated;
 				rxe[i].pkt_addr = translated;

@@ -196,11 +196,11 @@ static int vnic_init_regs(void)
 	#else
 		dma_addr_t rxq_phys = 
 			dbchecker_alloc_mtdt((dma_addr_t)(VNIC_RESV_MEM_PHYS + VNIC_RESV_RX_DESC),
-					VNIC_DESC_SIZE * VNIC_MAX_QUEUE_DEPTH, DMA_BIDIRECTIONAL, VNIC_DEV_ID);
+					VNIC_DESC_SIZE * VNIC_MAX_QUEUE_DEPTH, DMA_BIDIRECTIONAL, VNIC_DEV_ID, false);
 			dbchecker_activate_mtdt(rxq_phys, DMA_BIDIRECTIONAL, VNIC_DEV_ID, false);
 		dma_addr_t txq_phys = 
 			dbchecker_alloc_mtdt((dma_addr_t)(VNIC_RESV_MEM_PHYS + VNIC_RESV_TX_DESC),
-					VNIC_DESC_SIZE * VNIC_MAX_QUEUE_DEPTH, DMA_BIDIRECTIONAL, VNIC_DEV_ID);
+					VNIC_DESC_SIZE * VNIC_MAX_QUEUE_DEPTH, DMA_BIDIRECTIONAL, VNIC_DEV_ID, false);
 			dbchecker_activate_mtdt(txq_phys, DMA_BIDIRECTIONAL, VNIC_DEV_ID, false);
 		vnic_write_reg64(VNIC_REG_RX_DESC, rxq_phys);
 		vnic_write_reg64(VNIC_REG_TX_DESC, txq_phys);

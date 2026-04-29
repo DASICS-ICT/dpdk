@@ -28,9 +28,9 @@ cdma_common_copy_iova_prepare(uint64_t src_iova, uint64_t dst_iova,
 
 		/* CDMA reads src / writes dst — same dma direction naming as igb tx/rx. */
 		src_prog = dbchecker_alloc_mtdt((dma_addr_t)src_iova, len,
-			DMA_TO_DEVICE, CDMA_DBCHECKER_DEV_ID);
+			DMA_TO_DEVICE, CDMA_DBCHECKER_DEV_ID, true);
 		dst_prog = dbchecker_alloc_mtdt((dma_addr_t)dst_iova, len,
-			DMA_FROM_DEVICE, CDMA_DBCHECKER_DEV_ID);
+			DMA_FROM_DEVICE, CDMA_DBCHECKER_DEV_ID, true);
 		if (src_prog == (dma_addr_t)-1 || dst_prog == (dma_addr_t)-1) {
 			if (src_prog != (dma_addr_t)-1)
 				dbchecker_free_mtdt(src_prog);
