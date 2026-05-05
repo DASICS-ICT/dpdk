@@ -19,7 +19,6 @@
 #include <signal.h>
 #include <rte_atomic.h>
 #include <rte_ring.h>
-#include <rte_malloc.h>
 
 //#define TEST_ACT_CPUTIME
 
@@ -74,8 +73,9 @@ static struct onoff_profile g_onoff = {0, 0, 1, 0};
 static uint32_t g_seed = 1;
 static uint8_t g_eth_hdr_template[sizeof(struct rte_ether_hdr)];
 static uint64_t g_rng_state = 1;
-static int g_data_copy = 0;           /* --data-copy: copy each RX pkt to scratch buf */
-static uint8_t *g_scratch_buf = NULL; /* pre-allocated scratch buffer for data-copy test */
+static int g_data_copy = 0;           /* --data-copy: alloc mbuf, copy pkt data, free both */
+static volatile uint64_t g_copy_cycles = 0;
+static volatile uint64_t g_copy_packets = 0;
 
 struct perf_stats {
     uint64_t total_bytes;
@@ -104,7 +104,7 @@ static void usage(const char *prg)
     printf("  --size-bimodal: Enable two-size mix, e.g. 64,1500,0.3 (30%% large)\n");
     printf("  --onoff: On/off durations in ms, e.g. 200,100\n");
     printf("  --seed: RNG seed for reproducibility\n");
-    printf("  --data-copy: Copy each RX packet to scratch buffer (measure copy overhead)\n");
+    printf("  --data-copy: Alloc mbuf, copy RX pkt data, free both (measure copy overhead)\n");
 }
 
 static volatile sig_atomic_t g_stop;
@@ -305,6 +305,11 @@ static void print_stats(uint16_t port, struct perf_stats *s)
     } else {
         printf("Pkt size:      %u bytes\n", g_pkt_size);
     }
+    if (g_data_copy && g_copy_packets > 0) {
+        double avg_ns = (double)g_copy_cycles * 1e9 / ((double)g_copy_packets * hz);
+        printf("Data copy:      %.1f ns/pkt (avg), %" PRIu64 " cycles, %" PRIu64 " pkts\n",
+               avg_ns, g_copy_cycles, g_copy_packets);
+    }
     printf("============================\n");
 }
 
@@ -477,11 +482,19 @@ static int rx_worker(void *arg)
         }
 
         if (g_data_copy) {
-            for (uint16_t i = 0; i < nb; i++) {
-                rte_memcpy(g_scratch_buf + (uint32_t)i * RTE_MBUF_DEFAULT_BUF_SIZE,
-                           rte_pktmbuf_mtod(bufs[i], void *),
-                           bufs[i]->data_len);
+            uint64_t t0 = rte_rdtsc();
+            struct rte_mbuf *copy_bufs[512];
+            if (rte_pktmbuf_alloc_bulk(g_mp, copy_bufs, nb) == 0) {
+                for (uint16_t i = 0; i < nb; i++) {
+                    rte_memcpy(rte_pktmbuf_mtod(copy_bufs[i], void *),
+                               rte_pktmbuf_mtod(bufs[i], void *),
+                               bufs[i]->data_len);
+                }
+                /* free copied mbufs (simulating app freeing after use) */
+                rte_pktmbuf_free_bulk(copy_bufs, nb);
             }
+            g_copy_cycles += (rte_rdtsc() - t0);
+            g_copy_packets += nb;
         }
 
         /* free received mbufs in bulk */
@@ -532,15 +545,6 @@ int main(int argc, char **argv)
     /* store global mempool; rings removed since tx_worker now allocs/frees mbufs */
     g_mp = mp;
 
-    if (g_data_copy && !g_mode_tx) {
-        uint32_t scratch_burst = g_burst > 512 ? 512 : g_burst;
-        g_scratch_buf = rte_zmalloc_socket("scratch",
-            (size_t)scratch_burst * RTE_MBUF_DEFAULT_BUF_SIZE,
-            RTE_CACHE_LINE_SIZE, rte_socket_id());
-        if (!g_scratch_buf)
-            rte_exit(EXIT_FAILURE, "Cannot allocate scratch buffer\n");
-    }
-
     if (port_init(g_port_id, mp) < 0) rte_exit(EXIT_FAILURE, "Cannot init port %u\n", g_port_id);
 
     /* wait for link up (try up to 30 seconds) to increase chance first tx_burst succeeds) */
@@ -570,6 +574,8 @@ int main(int argc, char **argv)
     g_worker_done = 0;
     g_start_tsc = 0;
     g_end_tsc = 0;
+    g_copy_cycles = 0;
+    g_copy_packets = 0;
     /* single-core mode: run worker loop directly on main core */
     if (g_mode_tx) {
         struct rte_ether_addr src_mac;
@@ -595,7 +601,6 @@ int main(int argc, char **argv)
     print_stats(g_port_id, &s);
     rte_eth_dev_stop(g_port_id);
     rte_eth_dev_close(g_port_id);
-    rte_free(g_scratch_buf);
     rte_eal_cleanup();
     return 0;
 }
