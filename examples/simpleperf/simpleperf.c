@@ -74,7 +74,11 @@ static uint32_t g_seed = 1;
 static uint8_t g_eth_hdr_template[sizeof(struct rte_ether_hdr)];
 static uint64_t g_rng_state = 1;
 static int g_data_copy = 0;           /* --data-copy: alloc mbuf, copy pkt data, free both */
+static int g_copy_phases = 0;         /* --copy-phases: break down alloc/memcpy/free */
 static volatile uint64_t g_copy_cycles = 0;
+static volatile uint64_t g_alloc_cycles = 0;
+static volatile uint64_t g_memcpy_cycles = 0;
+static volatile uint64_t g_free_cycles = 0;
 static volatile uint64_t g_copy_packets = 0;
 
 struct perf_stats {
@@ -97,7 +101,7 @@ static void usage(const char *prg)
     printf("Usage: %s [EAL args] -- [--tx|--rx] [--port N] [--queue Q] [--burst B] [--size S] [--seconds T] [--mbufs N]\n", prg);
     printf("        [--dst-mac xx:xx:xx:xx:xx:xx] [--profile const|poisson|onoff] [--rate-bps N]\n");
     printf("        [--size-bimodal small,big,prob] [--onoff on_ms,off_ms] [--seed N]\n");
-    printf("        [--data-copy]\n");
+    printf("        [--data-copy [--copy-phases]]\n");
     printf("  --mbufs N: Set number of mbufs (range: 4096-65536, default: %d)\n", DEFAULT_NUM_MBUFS);
     printf("  --profile: Traffic pattern. const (default), poisson (random IAT), onoff (burst/silent)\n");
     printf("  --rate-bps: Target bytes per second (0=unlimited)\n");
@@ -105,6 +109,7 @@ static void usage(const char *prg)
     printf("  --onoff: On/off durations in ms, e.g. 200,100\n");
     printf("  --seed: RNG seed for reproducibility\n");
     printf("  --data-copy: Alloc mbuf, copy RX pkt data, free both (measure copy overhead)\n");
+    printf("  --copy-phases: Break down data-copy into alloc/memcpy/free phases\n");
 }
 
 static volatile sig_atomic_t g_stop;
@@ -265,6 +270,9 @@ static void parse_app_args(int argc, char **argv)
         else if (strcmp(argv[i], "--data-copy") == 0) {
             g_data_copy = 1;
         }
+        else if (strcmp(argv[i], "--copy-phases") == 0) {
+            g_copy_phases = 1;
+        }
         else if (strcmp(argv[i], "--dst-mac") == 0 && i + 1 < argc) {
             if (parse_mac(argv[++i], &g_dst_mac) == 0)
                 g_have_dst_mac = 1;
@@ -306,9 +314,21 @@ static void print_stats(uint16_t port, struct perf_stats *s)
         printf("Pkt size:      %u bytes\n", g_pkt_size);
     }
     if (g_data_copy && g_copy_packets > 0) {
-        double avg_ns = (double)g_copy_cycles * 1e9 / ((double)g_copy_packets * hz);
-        printf("Data copy:      %.1f ns/pkt (avg), %" PRIu64 " cycles, %" PRIu64 " pkts\n",
-               avg_ns, g_copy_cycles, g_copy_packets);
+        double total_ns = (double)g_copy_cycles * 1e9 / ((double)g_copy_packets * hz);
+        if (g_copy_phases) {
+            double alloc_ns  = (double)g_alloc_cycles  * 1e9 / ((double)g_copy_packets * hz);
+            double memcpy_ns = (double)g_memcpy_cycles * 1e9 / ((double)g_copy_packets * hz);
+            double free_ns   = (double)g_free_cycles   * 1e9 / ((double)g_copy_packets * hz);
+            printf("Data copy breakdown (ns/pkt):\n");
+            printf("  alloc:      %7.1f  (%5.1f%%)\n", alloc_ns,  alloc_ns  / total_ns * 100.0);
+            printf("  memcpy:     %7.1f  (%5.1f%%)\n", memcpy_ns, memcpy_ns / total_ns * 100.0);
+            printf("  free:       %7.1f  (%5.1f%%)\n", free_ns,   free_ns   / total_ns * 100.0);
+            printf("  ---------------------------------\n");
+            printf("  total:      %7.1f\n", total_ns);
+        } else {
+            printf("Data copy:      %.1f ns/pkt (avg), %" PRIu64 " cycles, %" PRIu64 " pkts\n",
+                   total_ns, g_copy_cycles, g_copy_packets);
+        }
     }
     printf("============================\n");
 }
@@ -340,6 +360,31 @@ static int port_init(uint16_t port, struct rte_mempool *mp)
     rte_eth_stats_reset(port);
     rte_eth_promiscuous_enable(port);
     return 0;
+}
+
+/* -------------------------------------------------------------------
+ * data-copy phase wrappers (static inline so perf can resolve symbol
+ * names from DWARF inline info, zero call/ret overhead)
+ * ------------------------------------------------------------------- */
+static inline int
+copy_alloc_bulk(struct rte_mbuf **bufs, uint16_t nb)
+{
+    return rte_pktmbuf_alloc_bulk(g_mp, bufs, nb);
+}
+
+static inline void
+copy_memcpy_burst(struct rte_mbuf **dst, struct rte_mbuf **src, uint16_t nb)
+{
+    for (uint16_t i = 0; i < nb; i++)
+        rte_memcpy(rte_pktmbuf_mtod(dst[i], void *),
+                   rte_pktmbuf_mtod(src[i], void *),
+                   src[i]->data_len);
+}
+
+static inline void
+copy_free_bulk(struct rte_mbuf **bufs, uint16_t nb)
+{
+    rte_pktmbuf_free_bulk(bufs, nb);
 }
 
 /* worker versions for multi-core mode (no printing) */
@@ -482,18 +527,31 @@ static int rx_worker(void *arg)
         }
 
         if (g_data_copy) {
-            uint64_t t0 = rte_rdtsc();
             struct rte_mbuf *copy_bufs[512];
-            if (rte_pktmbuf_alloc_bulk(g_mp, copy_bufs, nb) == 0) {
-                for (uint16_t i = 0; i < nb; i++) {
-                    rte_memcpy(rte_pktmbuf_mtod(copy_bufs[i], void *),
-                               rte_pktmbuf_mtod(bufs[i], void *),
-                               bufs[i]->data_len);
+            if (g_copy_phases) {
+                uint64_t t0, t1, t2, t3;
+                int ok;
+                t0 = rte_rdtsc_precise();
+                ok = (copy_alloc_bulk(copy_bufs, nb) == 0);
+                t1 = rte_rdtsc_precise();
+                if (ok) {
+                    copy_memcpy_burst(copy_bufs, bufs, nb);
+                    t2 = rte_rdtsc_precise();
+                    copy_free_bulk(copy_bufs, nb);
+                    t3 = rte_rdtsc_precise();
+                    g_alloc_cycles   += (t1 - t0);
+                    g_memcpy_cycles  += (t2 - t1);
+                    g_free_cycles    += (t3 - t2);
+                    g_copy_cycles    += (t3 - t0);
                 }
-                /* free copied mbufs (simulating app freeing after use) */
-                rte_pktmbuf_free_bulk(copy_bufs, nb);
+            } else {
+                uint64_t t0 = rte_rdtsc();
+                if (copy_alloc_bulk(copy_bufs, nb) == 0) {
+                    copy_memcpy_burst(copy_bufs, bufs, nb);
+                    copy_free_bulk(copy_bufs, nb);
+                }
+                g_copy_cycles += (rte_rdtsc() - t0);
             }
-            g_copy_cycles += (rte_rdtsc() - t0);
             g_copy_packets += nb;
         }
 
@@ -575,6 +633,9 @@ int main(int argc, char **argv)
     g_start_tsc = 0;
     g_end_tsc = 0;
     g_copy_cycles = 0;
+    g_alloc_cycles = 0;
+    g_memcpy_cycles = 0;
+    g_free_cycles = 0;
     g_copy_packets = 0;
     /* single-core mode: run worker loop directly on main core */
     if (g_mode_tx) {
