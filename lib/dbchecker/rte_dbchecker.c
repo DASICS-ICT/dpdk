@@ -78,8 +78,10 @@ RTE_EXPORT_SYMBOL(dbchecker_alloc_mtdt)
 dma_addr_t
 dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, uint16_t dev_id, bool auto_rel)
 {
-	if (!dbchecker_enable)
-		return addr;
+	if (!dbchecker_enable) {
+		if (dbchecker_init() < 0)
+			return (dma_addr_t)-1;
+	}
 	dbchecker_mtdt_u mtdt;
 	if (likely(dir <= DMA_TO_DEVICE))
 		mtdt.wr = dma_to_db_map[dir];
@@ -100,7 +102,7 @@ dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, 
 	const uint64_t v_mask = (1ULL << 39);
 
 	do {
-		if ((dbte_table[idx].raw1 & v_mask) == 0) {
+		if (idx != 0 && (dbte_table[idx].raw1 & v_mask) == 0) {
 			found = true;
 			break;
 		}
@@ -134,12 +136,6 @@ dbchecker_free_mtdt(dma_addr_t addr)
 		return addr;
 
 	uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
-
-	if (index >= MAX_DBTE_TABLE_SIZE) {
-		printf("DBCHECKER Error: free mtdt failed, index %u out of bounds (Max %u)\n",
-			index, MAX_DBTE_TABLE_SIZE);
-		return (dma_addr_t)-1;
-	}
 
 	dbchecker_mtdt_u mtdt;
 
@@ -323,8 +319,10 @@ dma_addr_t
 dbchecker_alloc_mtdt_generic(dma_addr_t addr, size_t size,
 	enum dma_data_direction dir, uint16_t dev_id, bool auto_rel)
 {
-	if (!dbchecker_enable)
-		return addr;
+	if (!dbchecker_enable) {
+		if (dbchecker_init() < 0)
+			return (dma_addr_t)-1;
+	}
 
 	dbchecker_mtdt_u mtdt;
 	if (likely(dir <= DMA_TO_DEVICE))
@@ -346,7 +344,7 @@ dbchecker_alloc_mtdt_generic(dma_addr_t addr, size_t size,
 	const uint64_t v_mask = (1ULL << 39);
 
 	do {
-		if ((dbte_table[idx].raw1 & v_mask) == 0) {
+		if (idx != 0 && (dbte_table[idx].raw1 & v_mask) == 0) {
 			found = true;
 			break;
 		}
