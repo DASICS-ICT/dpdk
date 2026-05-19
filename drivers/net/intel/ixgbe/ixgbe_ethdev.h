@@ -17,6 +17,9 @@
 #ifdef RTE_LIB_SECURITY
 #include "ixgbe_ipsec.h"
 #endif
+#ifdef RTE_ENABLE_DBCHECKER
+#define DEV_ID 0x0U
+#endif
 #include <rte_flow.h>
 #include <rte_time.h>
 #include <rte_hash.h>
