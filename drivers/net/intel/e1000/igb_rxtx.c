@@ -989,7 +989,7 @@ eth_igb_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		dma_addr = rte_mbuf_data_iova_default(nmb);
 		{
 			dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)dma_addr,
-				(size_t)nmb->buf_len, DMA_FROM_DEVICE, DEV_ID, true);
+				(size_t)nmb->buf_len, DMA_FROM_DEVICE, DEV_ID, false);
 			if (translated != (dma_addr_t)-1) {
 				dma_addr = translated;
 				rxe->pkt_addr = translated;
@@ -1202,7 +1202,7 @@ eth_igb_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		dma = rte_mbuf_data_iova_default(nmb);
 		{
 			dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)dma,
-				(size_t)nmb->buf_len, DMA_FROM_DEVICE, DEV_ID, true);
+				(size_t)nmb->buf_len, DMA_FROM_DEVICE, DEV_ID, false);
 			if (translated != (dma_addr_t)-1) {
 				dma = translated;
 				rxe->pkt_addr = translated;
@@ -2415,7 +2415,7 @@ igb_alloc_rx_queue_mbufs(struct igb_rx_queue *rxq)
 #ifdef RTE_ENABLE_DBCHECKER
 		{
 			dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)dma_addr,
-				(size_t)mbuf->buf_len, DMA_FROM_DEVICE, DEV_ID, true);
+				(size_t)mbuf->buf_len, DMA_FROM_DEVICE, DEV_ID, false);
 			if (translated != (dma_addr_t)-1) {
 				dma_addr = translated;
 				rxe[i].pkt_addr = translated;
