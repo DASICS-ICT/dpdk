@@ -24,6 +24,9 @@ struct ci_rx_queue;
 
 struct ci_rx_entry {
 	struct rte_mbuf *mbuf; /* mbuf associated with RX descriptor. */
+#ifdef RTE_ENABLE_DBCHECKER
+	uint64_t pkt_addr;
+#endif
 };
 
 struct ci_rx_entry_sc {
