@@ -49,6 +49,11 @@
 #include "base/ixgbe_osdep.h"
 #include "ixgbe_regs.h"
 
+#ifdef RTE_ENABLE_DBCHECKER
+#include <rte_dbchecker.h>
+static unsigned int ixgbe_dbchecker_refcnt;
+#endif
+
 /*
  * High threshold controlling when to start sending XOFF frames. Must be at
  * least 8 bytes less than receive packet buffer size. This value is in units
@@ -1139,6 +1144,10 @@ eth_ixgbe_dev_init(struct rte_eth_dev *eth_dev, void *init_params __rte_unused)
 
 		return 0;
 	}
+
+#ifdef RTE_ENABLE_DBCHECKER
+	ixgbe_dbchecker_refcnt++;
+#endif
 
 	/* NOTE: review for potential ordering optimization */
 	rte_atomic_store_explicit(&ad->link_thread_running, 0, rte_memory_order_seq_cst);
@@ -3143,6 +3152,13 @@ ixgbe_dev_close(struct rte_eth_dev *dev)
 #ifdef RTE_LIB_SECURITY
 	rte_free(dev->security_ctx);
 	dev->security_ctx = NULL;
+#endif
+
+#ifdef RTE_ENABLE_DBCHECKER
+	if (--ixgbe_dbchecker_refcnt == 0) {
+			(void)dbchecker_err_handler();
+		dbchecker_module_exit_hook();
+	}
 #endif
 
 	return ret;
