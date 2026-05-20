@@ -101,6 +101,19 @@
 #define rte_ixgbe_prefetch(p)   do {} while (0)
 #endif
 
+#ifdef RTE_ENABLE_DBCHECKER
+#include <rte_dbchecker.h>
+#endif
+
+#ifndef RTE_ENABLE_DBCHECKER
+typedef uint64_t dma_addr_t;
+enum dma_data_direction {
+	DMA_BIDIRECTIONAL = 0,
+	DMA_FROM_DEVICE = 1,
+	DMA_TO_DEVICE = 2
+};
+#endif
+
 /* forward-declare some functions */
 static int ixgbe_is_vf(struct rte_eth_dev *dev);
 
@@ -132,6 +145,12 @@ ixgbe_tx_free_bufs(struct ci_tx_queue *txq)
 	txep = &(txq->sw_ring[txq->tx_next_dd - (txq->tx_rs_thresh - 1)]);
 
 	for (i = 0; i < txq->tx_rs_thresh; ++i, ++txep) {
+#ifdef RTE_ENABLE_DBCHECKER
+		if (((uint64_t)txep->pkt_addr >> 48) != 0) {
+			dbchecker_free_mtdt((dma_addr_t)txep->pkt_addr);
+			txep->pkt_addr = 0;
+		}
+#endif
 		/* free buffers one at a time */
 		m = rte_pktmbuf_prefree_seg(txep->mbuf);
 		txep->mbuf = NULL;
@@ -164,16 +183,27 @@ ixgbe_tx_free_bufs(struct ci_tx_queue *txq)
 /* Populate 4 descriptors with data from 4 mbufs */
 static inline void
 tx4(volatile union ixgbe_adv_tx_desc *txdp, struct rte_mbuf **pkts,
-		const uint32_t olinfo_flags)
+		const uint32_t olinfo_flags, struct ci_tx_entry *txep)
 {
 	uint64_t buf_dma_addr;
 	uint32_t pkt_len;
 	int i;
 
-	for (i = 0; i < 4; ++i, ++txdp, ++pkts) {
+	for (i = 0; i < 4; ++i, ++txdp, ++pkts, ++txep) {
 		buf_dma_addr = rte_mbuf_data_iova(*pkts);
 		pkt_len = (*pkts)->data_len;
 
+#ifdef RTE_ENABLE_DBCHECKER
+		{
+			dma_addr_t translated = dbchecker_alloc_mtdt(
+				buf_dma_addr, (size_t)(*pkts)->buf_len,
+				DMA_TO_DEVICE);
+			if (translated != (dma_addr_t)-1) {
+				buf_dma_addr = translated;
+				txep->pkt_addr = translated;
+			}
+		}
+#endif
 		/* write data to descriptor */
 		txdp->read.buffer_addr = rte_cpu_to_le_64(buf_dma_addr);
 
@@ -191,7 +221,7 @@ tx4(volatile union ixgbe_adv_tx_desc *txdp, struct rte_mbuf **pkts,
 /* Populate 1 descriptor with data from 1 mbuf */
 static inline void
 tx1(volatile union ixgbe_adv_tx_desc *txdp, struct rte_mbuf **pkts,
-		const uint32_t olinfo_flags)
+		const uint32_t olinfo_flags, struct ci_tx_entry *txep)
 {
 	uint64_t buf_dma_addr;
 	uint32_t pkt_len;
@@ -199,6 +229,17 @@ tx1(volatile union ixgbe_adv_tx_desc *txdp, struct rte_mbuf **pkts,
 	buf_dma_addr = rte_mbuf_data_iova(*pkts);
 	pkt_len = (*pkts)->data_len;
 
+#ifdef RTE_ENABLE_DBCHECKER
+	{
+		dma_addr_t translated = dbchecker_alloc_mtdt(
+			buf_dma_addr, (size_t)(*pkts)->buf_len,
+			DMA_TO_DEVICE);
+		if (translated != (dma_addr_t)-1) {
+			buf_dma_addr = translated;
+			txep->pkt_addr = translated;
+		}
+	}
+#endif
 	/* write data to descriptor */
 	txdp->read.buffer_addr = rte_cpu_to_le_64(buf_dma_addr);
 	txdp->read.cmd_type_len =
@@ -237,13 +278,13 @@ ixgbe_tx_fill_hw_ring(struct ci_tx_queue *txq, struct rte_mbuf **pkts,
 		for (j = 0; j < N_PER_LOOP; ++j) {
 			(txep + i + j)->mbuf = *(pkts + i + j);
 		}
-		tx4(txdp + i, pkts + i, olinfo_flags);
+		tx4(txdp + i, pkts + i, olinfo_flags, txep + i);
 	}
 
 	if (unlikely(leftover > 0)) {
 		for (i = 0; i < leftover; ++i) {
 			(txep + mainpart + i)->mbuf = *(pkts + mainpart + i);
-			tx1(txdp + mainpart + i, pkts + mainpart + i, olinfo_flags);
+			tx1(txdp + mainpart + i, pkts + mainpart + i, olinfo_flags, txep + mainpart + i);
 		}
 	}
 }
@@ -869,6 +910,9 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 				rte_prefetch0(&txn->mbuf->pool);
 
 				if (txe->mbuf != NULL) {
+#ifdef RTE_ENABLE_DBCHECKER
+					dbchecker_free_mtdt((dma_addr_t)txe->pkt_addr);
+#endif
 					rte_pktmbuf_free_seg(txe->mbuf);
 					txe->mbuf = NULL;
 				}
@@ -908,8 +952,12 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 			txn = &sw_ring[txe->next_id];
 			rte_prefetch0(&txn->mbuf->pool);
 
-			if (txe->mbuf != NULL)
+			if (txe->mbuf != NULL) {
+#ifdef RTE_ENABLE_DBCHECKER
+				dbchecker_free_mtdt((dma_addr_t)txe->pkt_addr);
+#endif
 				rte_pktmbuf_free_seg(txe->mbuf);
+			}
 			txe->mbuf = m_seg;
 
 			/*
@@ -917,6 +965,16 @@ ixgbe_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts,
 			 */
 			slen = m_seg->data_len;
 			buf_dma_addr = rte_mbuf_data_iova(m_seg);
+#ifdef RTE_ENABLE_DBCHECKER
+			{
+				dma_addr_t translated = dbchecker_alloc_mtdt(
+					buf_dma_addr, (size_t)m_seg->buf_len,
+					DMA_TO_DEVICE);
+				if (translated != (dma_addr_t)-1)
+					buf_dma_addr = translated;
+			}
+			txe->pkt_addr = buf_dma_addr;
+#endif
 			txd->read.buffer_addr =
 				rte_cpu_to_le_64(buf_dma_addr);
 			txd->read.cmd_type_len =
@@ -1019,7 +1077,7 @@ ixgbe_prep_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 			rte_errno = -ret;
 			return i;
 		}
-#endif
+			#endif
 		ret = rte_net_intel_cksum_prepare(m);
 		if (ret != 0) {
 			rte_errno = -ret;
@@ -1676,7 +1734,21 @@ ixgbe_rx_alloc_bufs(struct ci_rx_queue *rxq, bool reset_mbuf)
 		mb->data_off = RTE_PKTMBUF_HEADROOM;
 
 		/* populate the descriptors */
-		dma_addr = rte_cpu_to_le_64(rte_mbuf_data_iova_default(mb));
+		dma_addr = rte_mbuf_data_iova_default(mb);
+#ifdef RTE_ENABLE_DBCHECKER
+		{
+			dma_addr_t translated = dbchecker_alloc_mtdt(
+				(dma_addr_t)dma_addr, (size_t)mb->buf_len,
+				DMA_FROM_DEVICE);
+			if (translated != (dma_addr_t)-1) {
+				rxep[i].pkt_addr = translated;
+				dma_addr = translated;
+			} else {
+				rxep[i].pkt_addr = (uint64_t)-1;
+			}
+		}
+#endif
+		dma_addr = rte_cpu_to_le_64(dma_addr);
 		rxdp[i].read.hdr_addr = 0;
 		rxdp[i].read.pkt_addr = dma_addr;
 	}
@@ -1917,8 +1989,28 @@ ixgbe_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 
 		rxm = rxe->mbuf;
 		rxe->mbuf = nmb;
+#ifdef RTE_ENABLE_DBCHECKER
+		if (((uint64_t)rxe->pkt_addr >> 48) != 0) {
+			dbchecker_free_mtdt((dma_addr_t)rxe->pkt_addr);
+			rxe->pkt_addr = 0;
+		}
+		dma_addr = rte_mbuf_data_iova_default(nmb);
+		{
+			dma_addr_t translated = dbchecker_alloc_mtdt(
+				(dma_addr_t)dma_addr, (size_t)nmb->buf_len,
+				DMA_FROM_DEVICE);
+			if (translated != (dma_addr_t)-1) {
+				dma_addr = translated;
+				rxe->pkt_addr = translated;
+			} else {
+				rxe->pkt_addr = (uint64_t)-1;
+			}
+		}
+		dma_addr = rte_cpu_to_le_64(dma_addr);
+#else
 		dma_addr =
 			rte_cpu_to_le_64(rte_mbuf_data_iova_default(nmb));
+#endif
 		rxdp->read.hdr_addr = 0;
 		rxdp->read.pkt_addr = dma_addr;
 
@@ -2198,8 +2290,29 @@ next_desc:
 		rxm = rxe->mbuf;
 
 		if (!bulk_alloc) {
+#ifdef RTE_ENABLE_DBCHECKER
+			uint64_t _dma;
+			if (((uint64_t)rxe->pkt_addr >> 48) != 0) {
+				dbchecker_free_mtdt((dma_addr_t)rxe->pkt_addr);
+				rxe->pkt_addr = 0;
+			}
+			_dma = rte_mbuf_data_iova_default(nmb);
+			{
+				dma_addr_t translated = dbchecker_alloc_mtdt(
+					(dma_addr_t)_dma, (size_t)nmb->buf_len,
+					DMA_FROM_DEVICE);
+				if (translated != (dma_addr_t)-1) {
+					_dma = translated;
+					rxe->pkt_addr = translated;
+				} else {
+					rxe->pkt_addr = (uint64_t)-1;
+				}
+			}
+			__le64 dma = rte_cpu_to_le_64(_dma);
+#else
 			__le64 dma =
 			  rte_cpu_to_le_64(rte_mbuf_data_iova_default(nmb));
+#endif
 			/*
 			 * Update RX descriptor with the physical address of the
 			 * new data buffer of the new allocated mbuf.
@@ -2426,6 +2539,12 @@ ixgbe_tx_done_cleanup_full(struct ci_tx_queue *txq, uint32_t free_cnt)
 			pkt_cnt < free_cnt &&
 			tx_id != tx_last; i++) {
 			if (swr_ring[tx_id].mbuf != NULL) {
+#ifdef RTE_ENABLE_DBCHECKER
+				if (((uint64_t)swr_ring[tx_id].pkt_addr >> 48) != 0) {
+					dbchecker_free_mtdt((dma_addr_t)swr_ring[tx_id].pkt_addr);
+					swr_ring[tx_id].pkt_addr = 0;
+				}
+					#endif
 				rte_pktmbuf_free_seg(swr_ring[tx_id].mbuf);
 				swr_ring[tx_id].mbuf = NULL;
 
@@ -2520,8 +2639,23 @@ static void __rte_cold
 ixgbe_tx_queue_release(struct ci_tx_queue *txq)
 {
 	if (txq != NULL && txq->ops != NULL) {
+#ifdef RTE_ENABLE_DBCHECKER
+		if (txq->sw_ring != NULL) {
+			unsigned int i;
+			for (i = 0; i < txq->nb_tx_desc; i++) {
+				if (((uint64_t)txq->sw_ring[i].pkt_addr >> 48) != 0) {
+					dbchecker_free_mtdt((dma_addr_t)txq->sw_ring[i].pkt_addr);
+					txq->sw_ring[i].pkt_addr = 0;
+				}
+			}
+		}
+#endif
 		ci_txq_release_all_mbufs(txq, false);
 		txq->ops->free_swring(txq);
+#ifdef RTE_ENABLE_DBCHECKER
+		if (((uint64_t)txq->tx_ring_dma >> 48) != 0)
+			dbchecker_free_mtdt((dma_addr_t)txq->tx_ring_dma);
+#endif
 		rte_memzone_free(txq->mz);
 		rte_free(txq);
 	}
@@ -2647,6 +2781,17 @@ ixgbe_tx_burst_mode_get(struct rte_eth_dev *dev,
 void __rte_cold
 ixgbe_set_tx_function(struct rte_eth_dev *dev, struct ci_tx_queue *txq)
 {
+#ifdef RTE_ENABLE_DBCHECKER
+	/* dbchecker forces scalar Tx (no vector Tx) */
+	if (txq->offloads == 0) {
+		dev->tx_pkt_burst = ixgbe_xmit_pkts_simple;
+		dev->tx_pkt_prepare = NULL;
+	} else {
+		dev->tx_pkt_burst = ixgbe_xmit_pkts;
+		dev->tx_pkt_prepare = ixgbe_prep_pkts;
+	}
+	return;
+#endif
 	/* Use a simple Tx queue (no offloads, no multi segs) if possible */
 	if ((txq->offloads == 0) &&
 #ifdef RTE_LIB_SECURITY
@@ -2899,6 +3044,14 @@ ixgbe_dev_tx_queue_setup(struct rte_eth_dev *dev,
 	}
 
 	txq->tx_ring_dma = tz->iova;
+#ifdef RTE_ENABLE_DBCHECKER
+	{
+		dma_addr_t translated = dbchecker_alloc_mtdt(
+			(dma_addr_t)tz->iova, tz->len, DMA_BIDIRECTIONAL);
+		if (translated != (dma_addr_t)-1)
+			txq->tx_ring_dma = translated;
+	}
+#endif
 	txq->ixgbe_tx_ring = (union ixgbe_adv_tx_desc *)tz->addr;
 
 	/* Allocate software ring */
@@ -2956,6 +3109,12 @@ ixgbe_rx_queue_release_mbufs_non_vec(struct ci_rx_queue *rxq)
 	if (rxq->sw_ring != NULL) {
 		for (i = 0; i < rxq->nb_rx_desc; i++) {
 			if (rxq->sw_ring[i].mbuf != NULL) {
+#ifdef RTE_ENABLE_DBCHECKER
+					if (((uint64_t)rxq->sw_ring[i].pkt_addr >> 48) != 0) {
+						dbchecker_free_mtdt((dma_addr_t)rxq->sw_ring[i].pkt_addr);
+						rxq->sw_ring[i].pkt_addr = 0;
+					}
+#endif
 				rte_pktmbuf_free_seg(rxq->sw_ring[i].mbuf);
 				rxq->sw_ring[i].mbuf = NULL;
 			}
@@ -2993,6 +3152,10 @@ ixgbe_rx_queue_release(struct ci_rx_queue *rxq)
 {
 	if (rxq != NULL) {
 		ixgbe_rx_queue_release_mbufs(rxq);
+#ifdef RTE_ENABLE_DBCHECKER
+		if (((uint64_t)rxq->rx_ring_phys_addr >> 48) != 0)
+			dbchecker_free_mtdt((dma_addr_t)rxq->rx_ring_phys_addr);
+#endif
 		rte_free(rxq->sw_ring);
 		rte_free(rxq->sw_sc_ring);
 		rte_memzone_free(rxq->mz);
@@ -3284,6 +3447,14 @@ ixgbe_dev_rx_queue_setup(struct rte_eth_dev *dev,
 			IXGBE_PCI_REG_ADDR(hw, IXGBE_RDT(rxq->reg_idx));
 
 	rxq->rx_ring_phys_addr = rz->iova;
+#ifdef RTE_ENABLE_DBCHECKER
+	{
+		dma_addr_t translated = dbchecker_alloc_mtdt(
+			(dma_addr_t)rz->iova, rz->len, DMA_BIDIRECTIONAL);
+		if (translated != (dma_addr_t)-1)
+			rxq->rx_ring_phys_addr = translated;
+	}
+#endif
 	rxq->ixgbe_rx_ring = (union ixgbe_adv_rx_desc *)rz->addr;
 
 	/*
@@ -3344,8 +3515,9 @@ ixgbe_dev_rx_queue_setup(struct rte_eth_dev *dev,
 				    "the whole port[%d]",
 			     rxq->queue_id, rxq->port_id);
 		adapter->rx_vec_allowed = false;
-	} else
+	} else {
 		ixgbe_rxq_vec_setup(rxq);
+		}
 
 	dev->data->rx_queues[queue_idx] = rxq;
 
@@ -4664,8 +4836,21 @@ ixgbe_alloc_rx_queue_mbufs(struct ci_rx_queue *rxq)
 		mbuf->data_off = RTE_PKTMBUF_HEADROOM;
 		mbuf->port = rxq->port_id;
 
-		dma_addr =
-			rte_cpu_to_le_64(rte_mbuf_data_iova_default(mbuf));
+		dma_addr = rte_mbuf_data_iova_default(mbuf);
+#ifdef RTE_ENABLE_DBCHECKER
+		{
+			dma_addr_t translated = dbchecker_alloc_mtdt(
+				(dma_addr_t)dma_addr, (size_t)mbuf->buf_len,
+				DMA_FROM_DEVICE);
+			if (translated != (dma_addr_t)-1) {
+				rxe[i].pkt_addr = translated;
+				dma_addr = translated;
+			} else {
+				rxe[i].pkt_addr = (uint64_t)-1;
+			}
+		}
+#endif
+		dma_addr = rte_cpu_to_le_64(dma_addr);
 		rxd = &rxq->ixgbe_rx_ring[i];
 		rxd->read.hdr_addr = 0;
 		rxd->read.pkt_addr = dma_addr;
@@ -4987,6 +5172,11 @@ ixgbe_set_rx_function(struct rte_eth_dev *dev)
 {
 	uint16_t i, rx_using_sse;
 	struct ixgbe_adapter *adapter = dev->data->dev_private;
+
+#ifdef RTE_ENABLE_DBCHECKER
+	adapter->rx_bulk_alloc_allowed = false;
+	adapter->rx_vec_allowed = false;
+#endif
 
 	/*
 	 * In order to allow Vector Rx there are a few configuration
