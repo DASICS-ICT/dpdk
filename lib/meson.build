@@ -20,6 +20,7 @@ libraries = [
         'rcu', # rcu depends on ring
         'mempool',
         'mbuf',
+        'platform_vfio_helper',
         'dbchecker',
         'net',
         'meter',
