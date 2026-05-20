@@ -19,6 +19,9 @@ struct ci_tx_entry {
 	struct rte_mbuf *mbuf; /* mbuf associated with TX desc, if any. */
 	uint16_t next_id; /* Index of next descriptor in ring. */
 	uint16_t last_id; /* Index of last scattered descriptor. */
+#ifdef RTE_ENABLE_DBCHECKER
+	uint64_t pkt_addr;
+#endif
 };
 
 /**
@@ -26,6 +29,9 @@ struct ci_tx_entry {
  */
 struct ci_tx_entry_vec {
 	struct rte_mbuf *mbuf; /* mbuf associated with TX desc, if any. */
+#ifdef RTE_ENABLE_DBCHECKER
+	uint64_t pkt_addr;
+#endif
 };
 
 typedef void (*ice_tx_release_mbufs_t)(struct ci_tx_queue *txq);
