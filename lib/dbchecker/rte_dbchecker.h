@@ -60,7 +60,7 @@ typedef union {
         uint64_t dev_id    : 5;
         uint64_t wr        : 2;
         uint64_t v         : 1;
-        uint64_t auto_rel_en : 1;  // auto-release for determinate-length transfers
+        uint64_t no_cache : 1;  // auto-release for determinate-length transfers
         uint64_t reserved  : 19;
         uint64_t index_off : 4;
     } __attribute__((packed));
@@ -108,14 +108,14 @@ void dbchecker_exit(void);
 int dbchecker_command(uint32_t cmd);
 void dbchecker_en_set(uint32_t dev_mask);
 uint32_t dbchecker_en_get(void);
-dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, uint16_t dev_id, bool auto_rel);
+dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, uint16_t dev_id, bool no_cache);
 dma_addr_t dbchecker_free_mtdt(dma_addr_t addr);
 void dbchecker_free_all_mtdt(void);
 int dbchecker_err_handler(void);
 int dbchecker_module_init_hook(void);
 void dbchecker_module_exit_hook(void);
 dma_addr_t dbchecker_alloc_mtdt_generic(dma_addr_t addr,
-    size_t size, enum dma_data_direction dir, uint16_t dev_id, bool auto_rel);
+    size_t size, enum dma_data_direction dir, uint16_t dev_id, bool no_cache);
 dma_addr_t dbchecker_free_mtdt_generic(dma_addr_t addr);
 
 #endif /* LIB_DBCHECKER_DBCHECKER_H */

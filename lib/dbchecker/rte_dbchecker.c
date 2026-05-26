@@ -76,7 +76,7 @@ dbchecker_en_get(void)
 
 RTE_EXPORT_SYMBOL(dbchecker_alloc_mtdt)
 dma_addr_t
-dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, uint16_t dev_id, bool auto_rel)
+dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, uint16_t dev_id, bool no_cache)
 {
 	if (!dbchecker_enable) {
 		if (dbchecker_init() < 0)
@@ -94,7 +94,7 @@ dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, 
 	mtdt.up_bnd_lo = (uint16_t)((addr + size) & 0xFFFFULL);
 	mtdt.up_bnd_hi = (uint32_t)(((addr + size) >> 16) & 0xFFFFFFFFUL);
 	mtdt.dev_id = dev_id & 0x1F;
-	mtdt.auto_rel_en = auto_rel ? 1 : 0;
+	mtdt.no_cache = no_cache ? 1 : 0;
 
 	uint16_t start = dbte_alloc_id;
 	uint16_t idx = start;
@@ -144,7 +144,7 @@ dbchecker_free_mtdt(dma_addr_t addr)
 
 	dbte_table[index].raw1 = mtdt.raw1;
 	rte_wmb();
-	if (!mtdt.auto_rel_en) {
+	if (!mtdt.no_cache) {
 		dbchecker_cmd_u free_cmd = {
 			.imm = index,
 			.op  = DBCHECKER_OP_FREE,
@@ -317,7 +317,7 @@ dbchecker_module_exit_hook(void)
 
 dma_addr_t
 dbchecker_alloc_mtdt_generic(dma_addr_t addr, size_t size,
-	enum dma_data_direction dir, uint16_t dev_id, bool auto_rel)
+	enum dma_data_direction dir, uint16_t dev_id, bool no_cache)
 {
 	if (!dbchecker_enable) {
 		if (dbchecker_init() < 0)
@@ -336,7 +336,7 @@ dbchecker_alloc_mtdt_generic(dma_addr_t addr, size_t size,
 	mtdt.up_bnd_lo = (uint16_t)((addr + size) & 0xFFFFULL);
 	mtdt.up_bnd_hi = (uint32_t)(((addr + size) >> 16) & 0xFFFFFFFFUL);
 	mtdt.dev_id = dev_id;
-	mtdt.auto_rel_en = auto_rel ? 1 : 0;
+	mtdt.no_cache = no_cache ? 1 : 0;
 
 	uint16_t start = dbte_alloc_id;
 	uint16_t idx = start;
