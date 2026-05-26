@@ -545,14 +545,13 @@ static int rx_worker(void *arg)
                     g_copy_cycles    += (t3 - t0);
                 }
             } else {
-                uint64_t t0 = rte_rdtsc();
                 if (copy_alloc_bulk(copy_bufs, nb) == 0) {
                     copy_memcpy_burst(copy_bufs, bufs, nb);
                     copy_free_bulk(copy_bufs, nb);
                 }
-                g_copy_cycles += (rte_rdtsc() - t0);
             }
-            g_copy_packets += nb;
+            if (g_copy_phases)
+                g_copy_packets += nb;
         }
 
         /* free received mbufs in bulk */
