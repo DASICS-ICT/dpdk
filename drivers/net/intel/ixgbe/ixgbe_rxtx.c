@@ -1741,7 +1741,7 @@ ixgbe_rx_alloc_bufs(struct ci_rx_queue *rxq, bool reset_mbuf)
 #ifdef RTE_ENABLE_DBCHECKER
 		{
 			dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)dma_addr,
-				(size_t)mb->buf_len, DMA_FROM_DEVICE, DEV_ID, false);
+				(size_t)mb->buf_len, DMA_FROM_DEVICE, DEV_ID, true);
 			// printf("DBCHECKER: alloc mtdt for dma_addr 0x%lx -> 0x%lx\n",
 			// 	(unsigned long)dma_addr, (unsigned long)translated);
 			if (translated != (dma_addr_t)-1) {
@@ -2001,7 +2001,7 @@ ixgbe_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		dma_addr = rte_mbuf_data_iova_default(nmb);
 		{
 			dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)dma_addr,
-				(size_t)nmb->buf_len, DMA_FROM_DEVICE, DEV_ID, false);
+				(size_t)nmb->buf_len, DMA_FROM_DEVICE, DEV_ID, true);
 			// printf("DBCHECKER: alloc mtdt for dma_addr 0x%lx -> 0x%lx\n",
 			// 	(unsigned long)dma_addr, (unsigned long)translated);
 			if (translated != (dma_addr_t)-1) {
@@ -4853,7 +4853,7 @@ ixgbe_alloc_rx_queue_mbufs(struct ci_rx_queue *rxq)
     #ifdef RTE_ENABLE_DBCHECKER
 		{
 			dma_addr_t translated = dbchecker_alloc_mtdt((dma_addr_t)dma_addr,
-				(size_t)mbuf->buf_len, DMA_FROM_DEVICE, DEV_ID, false);
+				(size_t)mbuf->buf_len, DMA_FROM_DEVICE, DEV_ID, true);
 			// printf("DBCHECKER: alloc mtdt for dma_addr 0x%lx -> 0x%lx\n",
 			// 	(unsigned long)dma_addr, (unsigned long)translated);
 			if (translated != (dma_addr_t)-1) {
