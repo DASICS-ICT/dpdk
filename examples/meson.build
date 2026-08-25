@@ -12,6 +12,7 @@ all_examples = [
         'bond',
         'cdma_demo',
         'cmdline',
+        'dbte_latency',
         'distributor',
         'dma',
         'ethtool',
