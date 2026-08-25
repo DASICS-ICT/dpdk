@@ -181,7 +181,29 @@ int
 cdma_copy(struct cdma_dev *dev, uint64_t src_iova, uint64_t dst_iova,
 	uint32_t len)
 {
+	return cdma_copy_with_hooks(dev, src_iova, dst_iova, len, NULL, NULL,
+		NULL, NULL);
+}
+
+RTE_EXPORT_SYMBOL(cdma_copy_with_pre_submit)
+int
+cdma_copy_with_pre_submit(struct cdma_dev *dev, uint64_t src_iova,
+	uint64_t dst_iova, uint32_t len, cdma_pre_submit_fn pre_submit,
+	void *pre_submit_arg)
+{
+	return cdma_copy_with_hooks(dev, src_iova, dst_iova, len, pre_submit,
+		pre_submit_arg, NULL, NULL);
+}
+
+RTE_EXPORT_SYMBOL(cdma_copy_with_hooks)
+int
+cdma_copy_with_hooks(struct cdma_dev *dev, uint64_t src_iova,
+	uint64_t dst_iova, uint32_t len, cdma_pre_submit_fn pre_submit,
+	void *pre_submit_arg, cdma_post_complete_fn post_complete,
+	void *post_complete_arg)
+{
 	uint32_t cr;
+	int post_rc;
 	int rc;
 	uint64_t src_use;
 	uint64_t dst_use;
@@ -212,6 +234,16 @@ cdma_copy(struct cdma_dev *dev, uint64_t src_iova, uint64_t dst_iova,
 		&src_use, &dst_use);
 	if (rc)
 		return rc;
+
+	if (pre_submit != NULL) {
+		rc = pre_submit(pre_submit_arg);
+		if (rc) {
+			cdma_common_copy_iova_finish(src_use, dst_use);
+			return rc;
+		}
+	}
+	rte_io_wmb();
+
 	cdma_reg_write(dev->regs, XAXICDMA_SRCADDR_OFFSET,
 		(uint32_t)(src_use & 0xFFFFFFFFu));
 	cdma_reg_write(dev->regs, XAXICDMA_SRCADDR_MSB_OFFSET,
@@ -223,6 +255,11 @@ cdma_copy(struct cdma_dev *dev, uint64_t src_iova, uint64_t dst_iova,
 	cdma_reg_write(dev->regs, XAXICDMA_BTT_OFFSET, len);
 
 	rc = cdma_wait_idle(dev, dev->timeout_cycles);
+	if (post_complete != NULL) {
+		post_rc = post_complete(post_complete_arg);
+		if (rc == 0 && post_rc != 0)
+			rc = post_rc;
+	}
 
 	cdma_common_copy_iova_finish(src_use, dst_use);
 
