@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <string.h>
 #include <errno.h>
@@ -17,10 +18,36 @@
 
 #include "rte_dbchecker.h"
 
-static uint16_t dbte_alloc_id;
+/* Keep the first 64-byte DBTE line unused so ID 0 is unambiguous in ILA. */
+static uint16_t dbte_alloc_id = 4;
 static uint8_t dbchecker_enable;
+static bool dbchecker_trace;
+static bool dbchecker_force_clean;
+static bool dbchecker_legacy_alloc;
 static struct rte_platform_vfio_device dbchecker_vfio = RTE_PLATFORM_VFIO_DEVICE_INITIALIZER;
 static dbchecker_mtdt_u *dbte_table;
+static rte_iova_t dbte_table_iova = RTE_BAD_IOVA;
+
+static inline bool
+dbchecker_env_enabled(const char *name)
+{
+	const char *value = getenv(name);
+
+	return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
+}
+
+static inline void
+dbchecker_debug_clean_line(const void *addr)
+{
+	if (!dbchecker_force_clean)
+		return;
+#if defined(__aarch64__)
+	uintptr_t line = (uintptr_t)addr & ~(uintptr_t)(RTE_CACHE_LINE_SIZE - 1U);
+
+	asm volatile("dc cvac, %0" : : "r"(line) : "memory");
+	asm volatile("dsb osh" : : : "memory");
+#endif
+}
 
 static inline uint32_t
 dbchecker_reg_read32(uint32_t off)
@@ -38,21 +65,22 @@ dbchecker_reg_write32(uint32_t off, uint32_t v)
 	rte_write32(v, (volatile void *)((uintptr_t)dbchecker_vfio.regs + off));
 }
 
-/*
- * dbte_alloc_id layout: [ group (12 bits) | offset (4 bits) ]
- */
 static inline uint16_t
 dbte_next_id(uint16_t id)
 {
-	uint16_t offset = id & 0xFULL;
-	uint16_t group = id >> 4;
+	if (dbchecker_legacy_alloc) {
+		uint16_t offset = id & 0xFU;
+		uint16_t group = id >> 4;
 
-	group++;
-	if (group > 0xFFF) {
-		group = 0;
-		offset = (offset + 1) & 0xFULL;
+		group++;
+		if (group > 0xFFFU) {
+			group = 0;
+			offset = (offset + 1U) & 0xFU;
+		}
+		return (uint16_t)((group << 4) | offset);
 	}
-	return (uint16_t)((group << 4) | (offset & 0xF));
+	/* ID 0 is reserved; all other IDs are allocated sequentially. */
+	return id == UINT16_MAX ? 1 : (uint16_t)(id + 1);
 }
 
 int
@@ -74,6 +102,93 @@ dbchecker_en_get(void)
 	return dbchecker_reg_read32(DBCHECKER_EN_OFFSET);
 }
 
+RTE_EXPORT_SYMBOL(dbchecker_perf_read)
+int
+dbchecker_perf_read(struct dbchecker_perf_stats *stats)
+{
+	if (stats == NULL)
+		return -EINVAL;
+	if (dbchecker_vfio.regs == NULL)
+		return -ENODEV;
+
+	stats->hit = dbchecker_reg_read32(DBCHECKER_PERF_HIT_OFFSET);
+	stats->miss = dbchecker_reg_read32(DBCHECKER_PERF_MISS_OFFSET);
+	stats->penalty_cycles =
+		dbchecker_reg_read32(DBCHECKER_PERF_PENALTY_OFFSET);
+	return 0;
+}
+
+RTE_EXPORT_SYMBOL(dbchecker_perf_reset)
+int
+dbchecker_perf_reset(void)
+{
+	uint32_t enable;
+
+	if (dbchecker_vfio.regs == NULL)
+		return -ENODEV;
+
+	enable = dbchecker_en_get();
+	if (enable == 0)
+		return -EACCES;
+
+	/* A non-zero write to EN preserves the mask and clears all perf counters. */
+	dbchecker_reg_write32(DBCHECKER_EN_OFFSET, enable);
+	rte_io_wmb();
+	return 0;
+}
+
+RTE_EXPORT_SYMBOL(dbchecker_refill_mode_get)
+int
+dbchecker_refill_mode_get(bool *line64)
+{
+	if (line64 == NULL)
+		return -EINVAL;
+	if (dbchecker_vfio.regs == NULL)
+		return -ENODEV;
+
+	*line64 = (dbchecker_reg_read32(DBCHECKER_REFILL_CFG_OFFSET) & 1U) != 0;
+	return 0;
+}
+
+RTE_EXPORT_SYMBOL(dbchecker_refill_mode_set)
+int
+dbchecker_refill_mode_set(bool line64)
+{
+	bool readback;
+
+	if (dbchecker_vfio.regs == NULL)
+		return -ENODEV;
+	if (dbchecker_en_get() != 0)
+		return -EBUSY;
+
+	dbchecker_reg_write32(DBCHECKER_REFILL_CFG_OFFSET, line64 ? 1U : 0U);
+	rte_io_wmb();
+	if (dbchecker_refill_mode_get(&readback) != 0 || readback != line64)
+		return -EBUSY;
+	return 0;
+}
+
+RTE_EXPORT_SYMBOL(dbchecker_refill_stats_read)
+int
+dbchecker_refill_stats_read(struct dbchecker_refill_stats *stats)
+{
+	uint32_t hist;
+
+	if (stats == NULL)
+		return -EINVAL;
+	if (dbchecker_vfio.regs == NULL)
+		return -ENODEV;
+
+	hist = dbchecker_reg_read32(DBCHECKER_REFILL_HIST_OFFSET);
+	for (unsigned int i = 0; i < 4; i++)
+		stats->served_hist[i] = (uint8_t)(hist >> (i * 8));
+	stats->different_line_wait_cycles =
+		dbchecker_reg_read32(DBCHECKER_DIFF_LINE_WAIT_OFFSET);
+	stats->rob_full_cycles = dbchecker_reg_read32(DBCHECKER_ROB_FULL_OFFSET);
+	stats->bytes = dbchecker_reg_read32(DBCHECKER_REFILL_BYTES_OFFSET);
+	return 0;
+}
+
 RTE_EXPORT_SYMBOL(dbchecker_alloc_mtdt)
 dma_addr_t
 dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, uint16_t dev_id, bool no_cache)
@@ -82,7 +197,7 @@ dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, 
 		if (dbchecker_init() < 0)
 			return (dma_addr_t)-1;
 	}
-	dbchecker_mtdt_u mtdt;
+	dbchecker_mtdt_u mtdt = { .raw0 = 0, .raw1 = 0 };
 	if (likely(dir <= DMA_TO_DEVICE))
 		mtdt.wr = dma_to_db_map[dir];
 	else
@@ -122,6 +237,23 @@ dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, 
 	dbte_table[idx].raw0 = mtdt.raw0;
 	rte_wmb();
 	dbte_table[idx].raw1 = mtdt.raw1;
+	rte_wmb();
+	dbchecker_debug_clean_line(&dbte_table[idx]);
+	if (unlikely(dbchecker_trace)) {
+		uint16_t line = idx & (uint16_t)~3U;
+
+		fprintf(stderr,
+			"DBCHECKER_TRACE alloc id=%u entry_iova=0x%" PRIx64
+			" raw=[0x%016" PRIx64 ",0x%016" PRIx64 "]\n",
+			idx, (uint64_t)dbte_table_iova + (uint64_t)idx * sizeof(*dbte_table),
+			mtdt.raw0, mtdt.raw1);
+		for (unsigned int i = 0; i < 4; i++)
+			fprintf(stderr,
+				"DBCHECKER_TRACE line id=%u raw=[0x%016" PRIx64
+				",0x%016" PRIx64 "]\n",
+				line + i, dbte_table[line + i].raw0,
+				dbte_table[line + i].raw1);
+	}
 	dbte_alloc_id = dbte_next_id(idx);
 	// printf("DBCHECKER: alloc mtdt idx %u for addr 0x%lx size 0x%zx (use iova 0x%lx)\n",
 	// 	idx, (unsigned long long)addr, size, (unsigned long long)alloc_addr);
@@ -185,7 +317,8 @@ dbchecker_err_handler(void)
 		fprintf(stderr, "DBCHECKER: error detected!\n");
 		fprintf(stderr, "DBCHECKER: error count: 0x%llx, info: 0x%llx, addr: 0x%llx\n",
 			(unsigned long long)cnt, (unsigned long long)info, (unsigned long long)addr);
-		if (index < MAX_DBTE_TABLE_SIZE && dbte_table != NULL)
+		/* index is uint16_t and the table contains all 65536 IDs. */
+		if (dbte_table != NULL)
 			fprintf(stderr, "DBCHECKER: error mtdt raw0 : 0x%llx, raw1: 0x%llx\n",
 				(unsigned long long)dbte_table[index].raw0,
 				(unsigned long long)dbte_table[index].raw1);
@@ -242,6 +375,10 @@ dbchecker_init_with_params(const struct dbchecker_params *params)
 	if (dbchecker_vfio.regs != NULL)
 		return -EBUSY;
 
+	dbchecker_trace = dbchecker_env_enabled("DBCHECKER_TRACE");
+	dbchecker_force_clean = dbchecker_env_enabled("DBCHECKER_FORCE_CLEAN");
+	dbchecker_legacy_alloc = dbchecker_env_enabled("DBCHECKER_LEGACY_ALLOC");
+
 	dbchecker_resolve_params(params, &cfg);
 
 	rte_platform_vfio_default_params(&vparams);
@@ -263,14 +400,29 @@ dbchecker_init_with_params(const struct dbchecker_params *params)
 		return -ENOMEM;
 	}
 
-	uint64_t dbte_table_phys = rte_mem_virt2iova((const void *)dbte_table);
+	dbte_table_iova = rte_mem_virt2iova((const void *)dbte_table);
+	if (dbte_table_iova == RTE_BAD_IOVA) {
+		printf("DBChecker: resolve dbte table IOVA failed\n");
+		rte_free(dbte_table);
+		dbte_table = NULL;
+		rte_platform_vfio_close(&dbchecker_vfio);
+		return -EFAULT;
+	}
 
-	DBCHECKER_DEBUG_LOG("DBChecker: dbte_table_iova = %lx\n", dbte_table_phys);
+	DBCHECKER_DEBUG_LOG("DBChecker: dbte_table_iova = %lx\n", dbte_table_iova);
 	dbchecker_reg_write32(DBCHECKER_DBTE_MB_LO_OFFSET,
-		(uint32_t)(dbte_table_phys & 0xFFFFFFFFUL));
+		(uint32_t)(dbte_table_iova & 0xFFFFFFFFUL));
 	dbchecker_reg_write32(DBCHECKER_DBTE_MB_HI_OFFSET,
-		(uint32_t)(dbte_table_phys >> 32));
+		(uint32_t)(dbte_table_iova >> 32));
+	if (unlikely(dbchecker_trace))
+		fprintf(stderr,
+			"DBCHECKER_TRACE table_va=%p table_iova=0x%" PRIx64
+			" reg_base=0x%08" PRIx32 "%08" PRIx32 "\n",
+			(void *)dbte_table, (uint64_t)dbte_table_iova,
+			dbchecker_reg_read32(DBCHECKER_DBTE_MB_HI_OFFSET),
+			dbchecker_reg_read32(DBCHECKER_DBTE_MB_LO_OFFSET));
 	dbchecker_en_set(DBCHECKER_ENABLE_MASK);
+	dbte_alloc_id = dbchecker_legacy_alloc ? 0 : 4;
 	dbchecker_enable = 1;
 	printf("DBCHECKER (userspace): init vfio-platform device %s\n", cfg.device_name);
 	return 0;
@@ -294,6 +446,7 @@ dbchecker_exit(void)
 	if (dbte_table != NULL) {
 		rte_free(dbte_table);
 		dbte_table = NULL;
+		dbte_table_iova = RTE_BAD_IOVA;
 	}
 
 	rte_platform_vfio_close(&dbchecker_vfio);
@@ -324,7 +477,7 @@ dbchecker_alloc_mtdt_generic(dma_addr_t addr, size_t size,
 			return (dma_addr_t)-1;
 	}
 
-	dbchecker_mtdt_u mtdt;
+	dbchecker_mtdt_u mtdt = { .raw0 = 0, .raw1 = 0 };
 	if (likely(dir <= DMA_TO_DEVICE))
 		mtdt.wr = dma_to_db_map[dir];
 	else
@@ -375,12 +528,6 @@ dbchecker_free_mtdt_generic(dma_addr_t addr)
 		return addr;
 
 	uint16_t index = (uint16_t)((addr >> 48) & 0xFFFFUL);
-
-	if (index >= MAX_DBTE_TABLE_SIZE) {
-		printf("DBCHECKER Error: free mtdt failed, index %u out of bounds (Max %u)\n",
-			index, MAX_DBTE_TABLE_SIZE);
-		return (dma_addr_t)-1;
-	}
 
 	dbchecker_mtdt_u mtdt;
 

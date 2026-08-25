@@ -28,10 +28,18 @@ enum dma_data_direction {
 #define DBCHECKER_ERR_ADDR_HI_OFFSET 0x14U
 #define DBCHECKER_ERR_INFO_OFFSET    0x18U
 #define DBCHECKER_ERR_CNT_OFFSET     0x1CU
+#define DBCHECKER_PERF_HIT_OFFSET     0x20U
+#define DBCHECKER_PERF_MISS_OFFSET    0x24U
+#define DBCHECKER_PERF_PENALTY_OFFSET 0x28U
+#define DBCHECKER_REFILL_CFG_OFFSET    0x2CU
+#define DBCHECKER_REFILL_HIST_OFFSET   0x40U
+#define DBCHECKER_DIFF_LINE_WAIT_OFFSET 0x44U
+#define DBCHECKER_ROB_FULL_OFFSET      0x48U
+#define DBCHECKER_REFILL_BYTES_OFFSET  0x4CU
 #define DBCHECKER_AUTO_REL_STATUS_OFFSET 0x30U
 #define DBCHECKER_AUTO_REL_PERF_OFFSET   0x34U
 
-#define MAX_DBTE_TABLE_SIZE 65535
+#define MAX_DBTE_TABLE_SIZE (1U << 16)
 
 enum dbchecker_cmd_op {
   DBCHECKER_OP_FREE,
@@ -99,6 +107,20 @@ struct dbchecker_params {
 	int debug_log;
 };
 
+/** Aggregate DBTE lookup counters maintained by the FPGA. */
+struct dbchecker_perf_stats {
+	uint32_t hit;
+	uint32_t miss;
+	uint32_t penalty_cycles;
+};
+
+struct dbchecker_refill_stats {
+	uint8_t served_hist[4];
+	uint32_t different_line_wait_cycles;
+	uint32_t rob_full_cycles;
+	uint32_t bytes;
+};
+
 void dbchecker_default_params(struct dbchecker_params *params);
 int dbchecker_init_with_params(const struct dbchecker_params *params);
 
@@ -108,6 +130,11 @@ void dbchecker_exit(void);
 int dbchecker_command(uint32_t cmd);
 void dbchecker_en_set(uint32_t dev_mask);
 uint32_t dbchecker_en_get(void);
+int dbchecker_perf_read(struct dbchecker_perf_stats *stats);
+int dbchecker_perf_reset(void);
+int dbchecker_refill_mode_set(bool line64);
+int dbchecker_refill_mode_get(bool *line64);
+int dbchecker_refill_stats_read(struct dbchecker_refill_stats *stats);
 dma_addr_t dbchecker_alloc_mtdt(dma_addr_t addr, size_t size, enum dma_data_direction dir, uint16_t dev_id, bool no_cache);
 dma_addr_t dbchecker_free_mtdt(dma_addr_t addr);
 void dbchecker_free_all_mtdt(void);
