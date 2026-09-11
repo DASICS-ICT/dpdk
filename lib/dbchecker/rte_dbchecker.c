@@ -172,16 +172,19 @@ RTE_EXPORT_SYMBOL(dbchecker_refill_stats_read)
 int
 dbchecker_refill_stats_read(struct dbchecker_refill_stats *stats)
 {
-	uint32_t hist;
-
 	if (stats == NULL)
 		return -EINVAL;
 	if (dbchecker_vfio.regs == NULL)
 		return -ENODEV;
 
-	hist = dbchecker_reg_read32(DBCHECKER_REFILL_HIST_OFFSET);
-	for (unsigned int i = 0; i < 4; i++)
-		stats->served_hist[i] = (uint8_t)(hist >> (i * 8));
+	stats->served_hist[0] =
+		dbchecker_reg_read32(DBCHECKER_REFILL_HIST_1_OFFSET);
+	stats->served_hist[1] =
+		dbchecker_reg_read32(DBCHECKER_REFILL_HIST_2_OFFSET);
+	stats->served_hist[2] =
+		dbchecker_reg_read32(DBCHECKER_REFILL_HIST_3_OFFSET);
+	stats->served_hist[3] =
+		dbchecker_reg_read32(DBCHECKER_REFILL_HIST_4P_OFFSET);
 	stats->different_line_wait_cycles =
 		dbchecker_reg_read32(DBCHECKER_DIFF_LINE_WAIT_OFFSET);
 	stats->rob_full_cycles = dbchecker_reg_read32(DBCHECKER_ROB_FULL_OFFSET);

@@ -32,10 +32,13 @@ enum dma_data_direction {
 #define DBCHECKER_PERF_MISS_OFFSET    0x24U
 #define DBCHECKER_PERF_PENALTY_OFFSET 0x28U
 #define DBCHECKER_REFILL_CFG_OFFSET    0x2CU
-#define DBCHECKER_REFILL_HIST_OFFSET   0x40U
-#define DBCHECKER_DIFF_LINE_WAIT_OFFSET 0x44U
-#define DBCHECKER_ROB_FULL_OFFSET      0x48U
-#define DBCHECKER_REFILL_BYTES_OFFSET  0x4CU
+#define DBCHECKER_REFILL_HIST_1_OFFSET 0x40U
+#define DBCHECKER_REFILL_HIST_2_OFFSET 0x44U
+#define DBCHECKER_REFILL_HIST_3_OFFSET 0x48U
+#define DBCHECKER_REFILL_HIST_4P_OFFSET 0x4CU
+#define DBCHECKER_DIFF_LINE_WAIT_OFFSET 0x50U
+#define DBCHECKER_ROB_FULL_OFFSET       0x54U
+#define DBCHECKER_REFILL_BYTES_OFFSET   0x58U
 #define DBCHECKER_AUTO_REL_STATUS_OFFSET 0x30U
 #define DBCHECKER_AUTO_REL_PERF_OFFSET   0x34U
 
@@ -115,7 +118,7 @@ struct dbchecker_perf_stats {
 };
 
 struct dbchecker_refill_stats {
-	uint8_t served_hist[4];
+	uint32_t served_hist[4];
 	uint32_t different_line_wait_cycles;
 	uint32_t rob_full_cycles;
 	uint32_t bytes;
